@@ -22,33 +22,33 @@ def create_directory(path):
 
 def find_desktop_path():
     """Find the correct desktop path, handling OneDrive scenarios"""
-    # Standard desktop path
+    # standard desktop path
     standard_path = os.path.join(os.path.expanduser("~"), "Desktop")
     
-    # OneDrive desktop path
+    # onedrive desktop path
     onedrive_path = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop")
     
-    # Check which one exists
+    # check which one exists
     if os.path.exists(onedrive_path):
         return onedrive_path
     elif os.path.exists(standard_path):
         return standard_path
     else:
-        # If neither exists, create and use the standard path
+        # if neither exists, create and use the standard path
         os.makedirs(standard_path, exist_ok=True)
         return standard_path
 
 def main():
     print_header("WORKPLACE SCHEDULER INSTALLER")
     
-    # Check Python version
+    # check python version
     print_step("Checking Python version...")
     if sys.version_info < (3, 7):
         print("Error: Python 3.7 or higher is required.")
         sys.exit(1)
     print(f"Python version {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} detected.")
     
-    # Install required packages
+    # install required packages
     print_step("Installing required packages...")
     packages = [
         "pandas", 
@@ -63,7 +63,7 @@ def main():
         print(f"Installing {package}...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", package])
     
-    # Create application directories
+    # create application directories
     print_step("Creating application directories...")
     app_dir = os.path.dirname(os.path.abspath(__file__))
     
@@ -79,7 +79,7 @@ def main():
     for directory in directories:
         create_directory(os.path.join(app_dir, directory))
     
-    # Create initial data file
+    # create initial data file
     print_step("Creating initial data file...")
     data_file = os.path.join(app_dir, "data.json")
     if not os.path.exists(data_file):
@@ -125,14 +125,14 @@ def main():
     else:
         print(f"Data file already exists: {data_file}")
     
-    # Create desktop shortcut
+    # create desktop shortcut
     print_step("Creating desktop shortcut...")
     desktop_path = find_desktop_path()
     shortcut_path = os.path.join(desktop_path, "Workplace Scheduler.bat")
     
     try:
         with open(shortcut_path, 'w') as f:
-            f.write(f'@echo off\n"{sys.executable}" "{os.path.join(app_dir, "App.py")}"\npause')
+            f.write(f'@echo off\ncd /d "{app_dir}"\n"{sys.executable}" "{os.path.join(app_dir, "App.py")}"\npause')
         
         print(f"Created desktop shortcut: {shortcut_path}")
     except Exception as e:
