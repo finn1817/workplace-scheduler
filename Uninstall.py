@@ -13,24 +13,24 @@ def print_step(text):
 
 def find_desktop_path():
     """Find the correct desktop path, handling OneDrive scenarios"""
-    # Standard desktop path
+    # standard desktop path
     standard_path = os.path.join(os.path.expanduser("~"), "Desktop")
     
-    # OneDrive desktop path
+    # onedrive desktop path
     onedrive_path = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop")
     
-    # Check which one exists
+    # check which one exists
     if os.path.exists(onedrive_path):
         return onedrive_path
     elif os.path.exists(standard_path):
         return standard_path
     else:
-        return standard_path  # Return standard path even if it doesn't exist
+        return standard_path  # return standard path even if it doesn't exist
 
 def main():
     print_header("WORKPLACE SCHEDULER UNINSTALLER")
     
-    # Get confirmation
+    # get confirmation
     print("\nWARNING: This will remove all application data including:")
     print("  - All workplace data")
     print("  - All saved schedules")
@@ -42,7 +42,7 @@ def main():
         input("\nPress Enter to exit...")
         return
     
-    # Remove desktop shortcut
+    # remove desktop shortcut
     print_step("Removing desktop shortcut...")
     desktop_path = find_desktop_path()
     shortcut_path = os.path.join(desktop_path, "Workplace Scheduler.bat")
@@ -56,7 +56,7 @@ def main():
     else:
         print("Desktop shortcut not found.")
     
-    # Remove data directories
+    # remove data directories
     print_step("Removing application data...")
     app_dir = os.path.dirname(os.path.abspath(__file__))
     
@@ -78,7 +78,7 @@ def main():
             except Exception as e:
                 print(f"Warning: Could not remove directory {dir_path}: {str(e)}")
     
-    # Remove data file
+    # remove data file
     data_file = os.path.join(app_dir, "data.json")
     if os.path.exists(data_file):
         try:
