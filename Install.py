@@ -20,6 +20,24 @@ def create_directory(path):
     else:
         print(f"Directory already exists: {path}")
 
+def find_desktop_path():
+    """Find the correct desktop path, handling OneDrive scenarios"""
+    # Standard desktop path
+    standard_path = os.path.join(os.path.expanduser("~"), "Desktop")
+    
+    # OneDrive desktop path
+    onedrive_path = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop")
+    
+    # Check which one exists
+    if os.path.exists(onedrive_path):
+        return onedrive_path
+    elif os.path.exists(standard_path):
+        return standard_path
+    else:
+        # If neither exists, create and use the standard path
+        os.makedirs(standard_path, exist_ok=True)
+        return standard_path
+
 def main():
     print_header("WORKPLACE SCHEDULER INSTALLER")
     
@@ -109,13 +127,17 @@ def main():
     
     # Create desktop shortcut
     print_step("Creating desktop shortcut...")
-    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+    desktop_path = find_desktop_path()
     shortcut_path = os.path.join(desktop_path, "Workplace Scheduler.bat")
     
-    with open(shortcut_path, 'w') as f:
-        f.write(f'@echo off\n"{sys.executable}" "{os.path.join(app_dir, "App.py")}"\npause')
-    
-    print(f"Created desktop shortcut: {shortcut_path}")
+    try:
+        with open(shortcut_path, 'w') as f:
+            f.write(f'@echo off\n"{sys.executable}" "{os.path.join(app_dir, "App.py")}"\npause')
+        
+        print(f"Created desktop shortcut: {shortcut_path}")
+    except Exception as e:
+        print(f"Warning: Could not create desktop shortcut: {str(e)}")
+        print(f"You can manually create a shortcut to: {os.path.join(app_dir, 'App.py')}")
     
     print_header("INSTALLATION COMPLETE")
     print("\nYou can now run the application by double-clicking the")
