@@ -18,7 +18,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QLabel, QPushButton, QComboBox, QTableWidget, QTableWidgetItem,
                             QFileDialog, QMessageBox, QTabWidget, QLineEdit, QCheckBox,
                             QTimeEdit, QSpinBox, QFormLayout, QGroupBox, QTextEdit, QDialog,
-                            QScrollArea, QFrame, QSplitter, QStackedWidget, QListWidget)
+                            QScrollArea, QFrame, QSplitter, QStackedWidget, QListWidget,
+                            QGridLayout, QTimeEdit, QHeaderView)
 from PyQt5.QtCore import Qt, QTime, QSize, QSettings, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QColor, QPalette
 
@@ -227,7 +228,8 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
                         "end": hour_to_time_str(shift_end),
                         "assigned": [f"{w['first_name']} {w['last_name']}" for w in assigned] if assigned else ["Unfilled"],
                         "available": [f"{w['first_name']} {w['last_name']}" for w in available_workers],
-                        "raw_assigned": [w['email'] for w in assigned] if assigned else []
+                        "raw_assigned": [w['email'] for w in assigned] if assigned else [],
+                        "all_available": [w for w in available_workers]  # store all available workers for editing
                     })
                 
                 # move to next shift
@@ -556,25 +558,25 @@ class WorkplaceTab(QWidget):
         layout.addLayout(actions_layout)
         
         # tab widget for different sections
-        tabs = QTabWidget()
+        self.tabs = QTabWidget()
         
         # workers tab
         workers_tab = QWidget()
         workers_layout = QVBoxLayout()
         
         # workers table
-        workers_table = QTableWidget()
-        workers_table.setColumnCount(6)
-        workers_table.setHorizontalHeaderLabels(["First Name", "Last Name", "Email", "Work Study", "Availability", "Actions"])
+        self.workers_table = QTableWidget()
+        self.workers_table.setColumnCount(6)
+        self.workers_table.setHorizontalHeaderLabels(["First Name", "Last Name", "Email", "Work Study", "Availability", "Actions"])
         
         # load workers
-        self.load_workers_table(workers_table)
+        self.load_workers_table(self.workers_table)
         
-        workers_layout.addWidget(workers_table)
+        workers_layout.addWidget(self.workers_table)
         
         # add worker button
         add_worker_btn = StyleHelper.create_button("Add Worker")
-        add_worker_btn.clicked.connect(lambda: self.add_worker_dialog(workers_table))
+        add_worker_btn.clicked.connect(lambda: self.add_worker_dialog(self.workers_table))
         workers_layout.addWidget(add_worker_btn)
         
         workers_tab.setLayout(workers_layout)
@@ -587,13 +589,13 @@ class WorkplaceTab(QWidget):
         hours_group_layout = QVBoxLayout()
         
         # load hours of operation
-        hours_table = QTableWidget()
-        hours_table.setColumnCount(3)
-        hours_table.setHorizontalHeaderLabels(["Day", "Start", "End"])
+        self.hours_table = QTableWidget()
+        self.hours_table.setColumnCount(3)
+        self.hours_table.setHorizontalHeaderLabels(["Day", "Start", "End"])
         
-        self.load_hours_table(hours_table)
+        self.load_hours_table(self.hours_table)
         
-        hours_group_layout.addWidget(hours_table)
+        hours_group_layout.addWidget(self.hours_table)
         hours_group.setLayout(hours_group_layout)
         hours_layout.addWidget(hours_group)
         
@@ -604,10 +606,10 @@ class WorkplaceTab(QWidget):
         hours_tab.setLayout(hours_layout)
         
         # add tabs
-        tabs.addTab(workers_tab, "Workers")
-        tabs.addTab(hours_tab, "Hours of Operation")
+        self.tabs.addTab(workers_tab, "Workers")
+        self.tabs.addTab(hours_tab, "Hours of Operation")
         
-        layout.addWidget(tabs)
+        layout.addWidget(self.tabs)
         
         self.setLayout(layout)
     
@@ -677,6 +679,9 @@ class WorkplaceTab(QWidget):
             # resize columns
             table.resizeColumnsToContents()
             
+            # make sure we're on the Workers tab after loading
+            self.tabs.setCurrentIndex(0)
+            
         except Exception as e:
             logging.error(f"Error loading workers: {str(e)}")
             QMessageBox.critical(self, "Error", f"Error loading workers: {str(e)}")
@@ -731,9 +736,7 @@ class WorkplaceTab(QWidget):
             shutil.copy2(file_path, destination)
             
             # reload workers table
-            workers_table = self.findChild(QTableWidget)
-            if workers_table:
-                self.load_workers_table(workers_table)
+            self.load_workers_table(self.workers_table)
             
             QMessageBox.information(self, "Success", "Excel file uploaded successfully.")
             
@@ -1242,9 +1245,7 @@ class WorkplaceTab(QWidget):
                 self.app_data = app_data
                 
                 # reload hours table
-                hours_table = self.findChild(QTableWidget, "", Qt.FindChildrenRecursively)
-                if hours_table:
-                    self.load_hours_table(hours_table)
+                self.load_hours_table(self.hours_table)
                 
                 dialog.accept()
                 
@@ -1357,18 +1358,18 @@ class WorkplaceTab(QWidget):
             dialog.accept()
             
             # show schedule
-            self.show_schedule_dialog(schedule, assigned_hours, low_hour_workers)
+            self.show_schedule_dialog(schedule, assigned_hours, low_hour_workers, workers)
             
         except Exception as e:
             logging.error(f"Error generating schedule: {str(e)}")
             QMessageBox.critical(dialog, "Error", f"Error generating schedule: {str(e)}")
     
-    def show_schedule_dialog(self, schedule, assigned_hours, low_hour_workers):
+    def show_schedule_dialog(self, schedule, assigned_hours, low_hour_workers, all_workers=None):
         """Show dialog with generated schedule"""
         dialog = QDialog(self)
         dialog.setWindowTitle("Generated Schedule")
-        dialog.setMinimumWidth(800)
-        dialog.setMinimumHeight(600)
+        dialog.setMinimumWidth(1000)
+        dialog.setMinimumHeight(700)
         
         layout = QVBoxLayout()
         
@@ -1376,8 +1377,10 @@ class WorkplaceTab(QWidget):
         tabs = QTabWidget()
         
         # schedule tab
-        schedule_tab = QWidget()
-        schedule_layout = QVBoxLayout()
+        schedule_tab = QScrollArea()
+        schedule_tab.setWidgetResizable(True)
+        schedule_content = QWidget()
+        schedule_layout = QVBoxLayout(schedule_content)
         
         # create schedule table
         for day, shifts in schedule.items():
@@ -1388,9 +1391,13 @@ class WorkplaceTab(QWidget):
             day_layout = QVBoxLayout()
             
             table = QTableWidget()
-            table.setColumnCount(3)
-            table.setHorizontalHeaderLabels(["Start", "End", "Assigned"])
+            table.setColumnCount(4)  # Added column for edit button
+            table.setHorizontalHeaderLabels(["Start", "End", "Assigned", "Actions"])
             table.setRowCount(len(shifts))
+            
+            # Stretch the last section to fill available space
+            header = table.horizontalHeader()
+            header.setSectionResizeMode(2, QHeaderView.Stretch)
             
             for i, shift in enumerate(shifts):
                 # start
@@ -1406,6 +1413,18 @@ class WorkplaceTab(QWidget):
                 if "Unfilled" in shift['assigned']:
                     assigned_item.setBackground(QColor(255, 200, 200))
                 table.setItem(i, 2, assigned_item)
+                
+                # edit button
+                edit_widget = QWidget()
+                edit_layout = QHBoxLayout(edit_widget)
+                edit_layout.setContentsMargins(0, 0, 0, 0)
+                
+                edit_btn = QPushButton("Edit")
+                edit_btn.setStyleSheet("background-color: #ffc107; color: black;")
+                edit_btn.clicked.connect(lambda _, d=day, s=shift, r=i, t=table: self.edit_shift_assignment(d, s, r, t, all_workers))
+                
+                edit_layout.addWidget(edit_btn)
+                table.setCellWidget(i, 3, edit_widget)
             
             table.resizeColumnsToContents()
             day_layout.addWidget(table)
@@ -1413,7 +1432,51 @@ class WorkplaceTab(QWidget):
             
             schedule_layout.addWidget(day_group)
         
-        schedule_tab.setLayout(schedule_layout)
+        # Add worker hours summary at the bottom
+        if assigned_hours:
+            hours_group = QGroupBox("Worker Hours Summary")
+            hours_layout = QVBoxLayout()
+            
+            hours_table = QTableWidget()
+            hours_table.setColumnCount(2)
+            hours_table.setHorizontalHeaderLabels(["Worker", "Hours"])
+            
+            # Sort workers by hours (descending)
+            sorted_workers = sorted(assigned_hours.items(), key=lambda x: x[1], reverse=True)
+            
+            hours_table.setRowCount(len(sorted_workers))
+            
+            for i, (email, hours) in enumerate(sorted_workers):
+                # Find worker name
+                worker_name = email
+                for worker in self.get_workers():
+                    if worker['email'] == email:
+                        worker_name = f"{worker['first_name']} {worker['last_name']}"
+                        break
+                
+                # Worker
+                worker_item = QTableWidgetItem(worker_name)
+                hours_table.setItem(i, 0, worker_item)
+                
+                # Hours
+                hours_item = QTableWidgetItem(f"{hours:.1f}")
+                if hours < 4:
+                    hours_item.setBackground(QColor(255, 200, 200))
+                hours_table.setItem(i, 1, hours_item)
+            
+            hours_table.resizeColumnsToContents()
+            hours_layout.addWidget(hours_table)
+            
+            # Low hour workers warning
+            if low_hour_workers:
+                warning_label = QLabel(f"Warning: The following workers have fewer than 4 hours: {', '.join(low_hour_workers)}")
+                warning_label.setStyleSheet("color: red;")
+                hours_layout.addWidget(warning_label)
+            
+            hours_group.setLayout(hours_layout)
+            schedule_layout.addWidget(hours_group)
+        
+        schedule_tab.setWidget(schedule_content)
         
         # hours tab
         hours_tab = QWidget()
@@ -1423,24 +1486,24 @@ class WorkplaceTab(QWidget):
         hours_table.setColumnCount(2)
         hours_table.setHorizontalHeaderLabels(["Worker", "Hours"])
         
-        # sort workers by hours (descending)
+        # Sort workers by hours (descending)
         sorted_workers = sorted(assigned_hours.items(), key=lambda x: x[1], reverse=True)
         
         hours_table.setRowCount(len(sorted_workers))
         
         for i, (email, hours) in enumerate(sorted_workers):
-            # find worker name
+            # Find worker name
             worker_name = email
             for worker in self.get_workers():
                 if worker['email'] == email:
                     worker_name = f"{worker['first_name']} {worker['last_name']}"
                     break
             
-            # worker
+            # Worker
             worker_item = QTableWidgetItem(worker_name)
             hours_table.setItem(i, 0, worker_item)
             
-            # hours
+            # Hours
             hours_item = QTableWidgetItem(f"{hours:.1f}")
             if hours < 4:
                 hours_item.setBackground(QColor(255, 200, 200))
@@ -1449,7 +1512,7 @@ class WorkplaceTab(QWidget):
         hours_table.resizeColumnsToContents()
         hours_layout.addWidget(hours_table)
         
-        # low hour workers warning
+        # Low hour workers warning
         if low_hour_workers:
             warning_label = QLabel(f"Warning: The following workers have fewer than 4 hours: {', '.join(low_hour_workers)}")
             warning_label.setStyleSheet("color: red;")
@@ -1457,13 +1520,13 @@ class WorkplaceTab(QWidget):
         
         hours_tab.setLayout(hours_layout)
         
-        # add tabs
+        # Add tabs
         tabs.addTab(schedule_tab, "Schedule")
         tabs.addTab(hours_tab, "Worker Hours")
         
         layout.addWidget(tabs)
         
-        # buttons
+        # Buttons
         buttons_layout = QHBoxLayout()
         
         save_btn = StyleHelper.create_button("Save Schedule")
@@ -1478,12 +1541,113 @@ class WorkplaceTab(QWidget):
         
         dialog.setLayout(layout)
         
-        # connect buttons
-        save_btn.clicked.connect(lambda: self.save_schedule(dialog, schedule))
-        email_btn.clicked.connect(lambda: self.email_schedule_dialog(schedule))
+        # Store schedule and workers in dialog for editing
+        dialog.schedule = schedule
+        dialog.all_workers = all_workers
+        dialog.assigned_hours = assigned_hours
+        
+        # Connect buttons
+        save_btn.clicked.connect(lambda: self.save_schedule(dialog, dialog.schedule))
+        email_btn.clicked.connect(lambda: self.email_schedule_dialog(dialog.schedule))
         close_btn.clicked.connect(dialog.reject)
         
         dialog.exec_()
+    
+    def edit_shift_assignment(self, day, shift, row, table, all_workers):
+        """Edit worker assignment for a shift"""
+        if not all_workers:
+            QMessageBox.warning(self, "Warning", "No workers available to edit this shift.")
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Edit Shift: {day} {format_time_ampm(shift['start'])} - {format_time_ampm(shift['end'])}")
+        dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout()
+        
+        # Get available workers for this shift
+        available_workers = shift.get('all_available', [])
+        
+        # Create list of workers
+        worker_list = QListWidget()
+        
+        # Add all available workers
+        for worker in available_workers:
+            item = QListWidgetItem(f"{worker['first_name']} {worker['last_name']}")
+            item.setData(Qt.UserRole, worker)
+            
+            # Check if worker is currently assigned
+            if f"{worker['first_name']} {worker['last_name']}" in shift['assigned']:
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+            
+            worker_list.setSelectionMode(QListWidget.NoSelection)
+            worker_list.addItem(item)
+        
+        layout.addWidget(QLabel(f"Select workers for {day} {format_time_ampm(shift['start'])} - {format_time_ampm(shift['end'])}:"))
+        layout.addWidget(worker_list)
+        
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        
+        save_btn = StyleHelper.create_button("Save")
+        cancel_btn = StyleHelper.create_button("Cancel", primary=False)
+        
+        buttons_layout.addWidget(save_btn)
+        buttons_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(buttons_layout)
+        
+        dialog.setLayout(layout)
+        
+        # Connect buttons
+        save_btn.clicked.connect(lambda: self.update_shift_assignment(dialog, day, shift, row, table, worker_list))
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        dialog.exec_()
+    
+    def update_shift_assignment(self, dialog, day, shift, row, table, worker_list):
+        """Update the worker assignment for a shift"""
+        # Get selected workers
+        selected_workers = []
+        for i in range(worker_list.count()):
+            item = worker_list.item(i)
+            if item.checkState() == Qt.Checked:
+                worker = item.data(Qt.UserRole)
+                selected_workers.append(worker)
+        
+        # Update shift data
+        shift['assigned'] = [f"{w['first_name']} {w['last_name']}" for w in selected_workers] if selected_workers else ["Unfilled"]
+        shift['raw_assigned'] = [w['email'] for w in selected_workers] if selected_workers else []
+        
+        # Update table
+        assigned_item = QTableWidgetItem(", ".join(shift['assigned']))
+        if "Unfilled" in shift['assigned']:
+            assigned_item.setBackground(QColor(255, 200, 200))
+        table.setItem(row, 2, assigned_item)
+        
+        # Update parent dialog's schedule
+        parent_dialog = dialog.parent()
+        if hasattr(parent_dialog, 'schedule'):
+            parent_dialog.schedule[day] = [s if s != shift else shift for s in parent_dialog.schedule[day]]
+            
+            # Recalculate assigned hours
+            if hasattr(parent_dialog, 'all_workers') and parent_dialog.all_workers:
+                assigned_hours = {w['email']: 0 for w in parent_dialog.all_workers}
+                
+                for day, shifts in parent_dialog.schedule.items():
+                    for s in shifts:
+                        shift_start = time_to_hour(s['start'])
+                        shift_end = time_to_hour(s['end'])
+                        shift_hours = shift_end - shift_start
+                        
+                        for email in s['raw_assigned']:
+                            assigned_hours[email] = assigned_hours.get(email, 0) + shift_hours
+                
+                parent_dialog.assigned_hours = assigned_hours
+        
+        dialog.accept()
     
     def get_workers(self):
         """Get workers from Excel file"""
@@ -1626,8 +1790,22 @@ class WorkplaceTab(QWidget):
             with open(save_path, "r") as f:
                 schedule = json.load(f)
             
+            # load workers for editing
+            all_workers = self.get_workers()
+            
+            # calculate assigned hours
+            assigned_hours = {}
+            for day, shifts in schedule.items():
+                for shift in shifts:
+                    shift_start = time_to_hour(shift['start'])
+                    shift_end = time_to_hour(shift['end'])
+                    shift_hours = shift_end - shift_start
+                    
+                    for email in shift.get('raw_assigned', []):
+                        assigned_hours[email] = assigned_hours.get(email, 0) + shift_hours
+            
             # show schedule
-            self.show_schedule_dialog(schedule, {}, [])
+            self.show_schedule_dialog(schedule, assigned_hours, [], all_workers)
             
         except Exception as e:
             logging.error(f"Error viewing schedule: {str(e)}")
