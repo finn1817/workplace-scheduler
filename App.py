@@ -852,6 +852,11 @@ class WorkplaceTab(QWidget):
             df = pd.read_excel(file_path)
             df.columns = df.columns.str.strip()
             
+            # Filter out rows that don't have valid data
+            df = df.dropna(subset=['Email'], how='all')
+            df = df[df['Email'].str.strip() != '']
+            df = df[~df['Email'].str.contains('nan', case=False, na=False)]
+            
             # set row count
             table.setRowCount(len(df))
             
@@ -859,23 +864,33 @@ class WorkplaceTab(QWidget):
             for i, (_, row) in enumerate(df.iterrows()):
                 # first name
                 first_name = row.get("First Name", "")
+                if pd.isna(first_name) or first_name == "nan":
+                    first_name = ""
                 table.setItem(i, 0, QTableWidgetItem(str(first_name)))
                 
                 # last name
                 last_name = row.get("Last Name", "")
+                if pd.isna(last_name) or last_name == "nan":
+                    last_name = ""
                 table.setItem(i, 1, QTableWidgetItem(str(last_name)))
                 
                 # email
                 email = row.get("Email", "")
+                if pd.isna(email) or email == "nan":
+                    email = ""
                 table.setItem(i, 2, QTableWidgetItem(str(email)))
                 
                 # work study
                 work_study = row.get("Work Study", "No")
+                if pd.isna(work_study) or work_study == "nan":
+                    work_study = "No"
                 table.setItem(i, 3, QTableWidgetItem(str(work_study)))
                 
                 # availability
                 avail_column = next((col for col in df.columns if 'available' in col.lower()), None)
                 availability_text = str(row.get(avail_column, "")) if avail_column else ""
+                if pd.isna(availability_text) or availability_text == "nan":
+                    availability_text = ""
                 table.setItem(i, 4, QTableWidgetItem(availability_text))
                 
                 # actions
@@ -956,6 +971,9 @@ class WorkplaceTab(QWidget):
             import shutil
             shutil.copy2(file_path, destination)
             
+            # Clean up the Excel file
+            self.clean_excel_file(destination)
+            
             # reload workers table
             self.load_workers_table(self.workers_table)
             
@@ -964,6 +982,27 @@ class WorkplaceTab(QWidget):
         except Exception as e:
             logging.error(f"Error uploading Excel file: {str(e)}")
             QMessageBox.critical(self, "Error", f"Error uploading Excel file: {str(e)}")
+    
+    def clean_excel_file(self, file_path):
+        """Clean up the Excel file to remove empty rows and fix formatting"""
+        try:
+            # Read the Excel file
+            df = pd.read_excel(file_path)
+            
+            # Clean column names
+            df.columns = df.columns.str.strip()
+            
+            # Filter out rows with empty or 'nan' emails
+            df = df.dropna(subset=['Email'], how='all')
+            df = df[df['Email'].str.strip() != '']
+            df = df[~df['Email'].str.contains('nan', case=False, na=False)]
+            
+            # Save the cleaned file
+            df.to_excel(file_path, index=False)
+            
+        except Exception as e:
+            logging.error(f"Error cleaning Excel file: {str(e)}")
+            raise
     
     def add_worker_dialog(self, table):
         """Show dialog to add a worker"""
@@ -1042,6 +1081,11 @@ class WorkplaceTab(QWidget):
                 # load existing file
                 df = pd.read_excel(file_path)
                 df.columns = df.columns.str.strip()
+                
+                # Clean the DataFrame
+                df = df.dropna(subset=['Email'], how='all')
+                df = df[df['Email'].str.strip() != '']
+                df = df[~df['Email'].str.contains('nan', case=False, na=False)]
                 
                 # check if email already exists
                 if email in df['Email'].values:
@@ -1250,6 +1294,11 @@ class WorkplaceTab(QWidget):
             df = pd.read_excel(file_path)
             df.columns = df.columns.str.strip()
             
+            # Check if the worker exists
+            if email not in df['Email'].values:
+                QMessageBox.warning(self, "Warning", "Worker not found.")
+                return
+            
             # remove worker
             df = df[df['Email'] != email]
             
@@ -1258,6 +1307,8 @@ class WorkplaceTab(QWidget):
             
             # reload workers table
             self.load_workers_table(table)
+            
+            QMessageBox.information(self, "Success", "Worker deleted successfully.")
             
         except Exception as e:
             logging.error(f"Error deleting worker: {str(e)}")
@@ -1366,11 +1417,18 @@ class WorkplaceTab(QWidget):
             df = pd.read_excel(file_path)
             df.columns = df.columns.str.strip()
             
+            # Clean the DataFrame
+            df = df.dropna(subset=['Email'], how='all')
+            df = df[df['Email'].str.strip() != '']
+            df = df[~df['Email'].str.contains('nan', case=False, na=False)]
+            
             workers = []
             for _, row in df.iterrows():
                 # Get availability from the "Days & Times Available" column
                 avail_column = next((col for col in df.columns if 'available' in col.lower()), None)
                 availability_text = str(row.get(avail_column, "")) if avail_column else ""
+                if pd.isna(availability_text) or availability_text == "nan":
+                    availability_text = ""
                 
                 # Parse availability into structured format
                 availability = parse_availability(availability_text)
@@ -1701,13 +1759,27 @@ class WorkplaceTab(QWidget):
             df = pd.read_excel(file_path)
             df.columns = df.columns.str.strip()
             
+            # Clean the DataFrame
+            df = df.dropna(subset=['Email'], how='all')
+            df = df[df['Email'].str.strip() != '']
+            df = df[~df['Email'].str.contains('nan', case=False, na=False)]
+            
             workers = []
             for _, row in df.iterrows():
+                first_name = row.get("First Name", "").strip()
+                last_name = row.get("Last Name", "").strip()
+                email = row.get("Email", "").strip()
+                work_study = str(row.get("Work Study", "")).strip().lower() in ['yes', 'y', 'true']
+                
+                # Skip invalid rows
+                if pd.isna(email) or email == "" or email == "nan":
+                    continue
+                
                 workers.append({
-                    "first_name": row.get("First Name", "").strip(),
-                    "last_name": row.get("Last Name", "").strip(),
-                    "email": row.get("Email", "").strip(),
-                    "work_study": str(row.get("Work Study", "")).strip().lower() in ['yes', 'y', 'true']
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "email": email,
+                    "work_study": work_study
                 })
             
             return workers
