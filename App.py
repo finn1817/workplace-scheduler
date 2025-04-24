@@ -176,9 +176,33 @@ def is_worker_available(worker, day, shift_start, shift_end):
     # If we get here, no available block fully contains the shift
     return False
 
+def find_alternative_workers(workers, day, shift_start, shift_end, assigned_hours, max_hours_per_worker, already_assigned):
+    """Find alternative workers who could work this shift"""
+    alternatives = []
+    
+    for worker in workers:
+        email = worker['email']
+        
+        # Skip if already assigned to this shift
+        if email in already_assigned:
+            continue
+            
+        # Check if worker is available for this shift
+        if is_worker_available(worker, day, shift_start, shift_end):
+            # Check if adding this shift would exceed max hours
+            shift_hours = shift_end - shift_start
+            if assigned_hours.get(email, 0) + shift_hours <= max_hours_per_worker:
+                alternatives.append(worker)
+    
+    # Sort by assigned hours (least to most)
+    alternatives.sort(key=lambda w: assigned_hours.get(w['email'], 0))
+    
+    return alternatives
+
 def create_shifts_from_availability(hours_of_operation, workers, workplace, max_hours_per_worker, max_workers_per_shift):
     """Create shifts based on hours of operation and worker availability"""
     schedule = {}
+    unfilled_shifts = []
     
     # determine ideal shift length based on workplace
     if "lounge" in workplace.lower() or "arena" in workplace.lower():
@@ -256,6 +280,16 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
                         assigned_hours[email] += (shift_end - current_hour)
                         assigned_days[email].add(day)
                     
+                    # Check if shift is unfilled
+                    if not assigned:
+                        unfilled_shifts.append({
+                            "day": day,
+                            "start": hour_to_time_str(current_hour),
+                            "end": hour_to_time_str(shift_end),
+                            "start_hour": current_hour,
+                            "end_hour": shift_end
+                        })
+                    
                     # add shift to schedule
                     schedule[day].append({
                         "start": hour_to_time_str(current_hour),
@@ -281,7 +315,30 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
         if assigned_hours[w['email']] == 0:
             unassigned_workers.append(f"{w['first_name']} {w['last_name']}")
     
-    return schedule, assigned_hours, low_hour_workers, unassigned_workers
+    # Find alternative solutions for unfilled shifts
+    alternative_solutions = {}
+    for shift in unfilled_shifts:
+        day = shift["day"]
+        start_hour = shift["start_hour"]
+        end_hour = shift["end_hour"]
+        
+        # Find workers who could work this shift if they worked more hours
+        alternatives = find_alternative_workers(
+            workers, 
+            day, 
+            start_hour, 
+            end_hour, 
+            {}, # Ignore current assigned hours to find all possibilities
+            max_hours_per_worker * 1.5, # Allow exceeding max hours for alternatives
+            []
+        )
+        
+        if alternatives:
+            alternative_solutions[f"{day} {shift['start']}-{shift['end']}"] = [
+                f"{w['first_name']} {w['last_name']}" for w in alternatives
+            ]
+    
+    return schedule, assigned_hours, low_hour_workers, unassigned_workers, alternative_solutions, unfilled_shifts
 
 def send_schedule_email(workplace, schedule, recipient_emails, sender_email, sender_password):
     """Send schedule via email"""
@@ -748,6 +805,103 @@ class HoursOfOperationDialog(QDialog):
         
         self.hours_data = hours_data
         self.accept()
+
+class AlternativeSolutionsDialog(QDialog):
+    """Dialog for showing alternative solutions for unfilled shifts"""
+    
+    def __init__(self, alternative_solutions, unfilled_shifts, parent=None):
+        super().__init__(parent)
+        self.alternative_solutions = alternative_solutions
+        self.unfilled_shifts = unfilled_shifts
+        self.initUI()
+    
+    def initUI(self):
+        self.setWindowTitle("Schedule Suggestions")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(400)
+        
+        layout = QVBoxLayout()
+        
+        # Title
+        title = QLabel("Suggestions for Unfilled Shifts")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(title)
+        
+        # Explanation
+        explanation = QLabel("The following shifts are currently unfilled. Here are some suggestions to fill them:")
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        
+        # Create a scroll area for the content
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        
+        # Check if there are unfilled shifts
+        if not self.unfilled_shifts:
+            no_unfilled = QLabel("All shifts are filled! Great job!")
+            no_unfilled.setStyleSheet("font-weight: bold; color: green;")
+            scroll_layout.addWidget(no_unfilled)
+        else:
+            # For each unfilled shift
+            for shift in self.unfilled_shifts:
+                day = shift["day"]
+                start = format_time_ampm(shift["start"])
+                end = format_time_ampm(shift["end"])
+                
+                shift_key = f"{day} {shift['start']}-{shift['end']}"
+                
+                # Create a group box for each shift
+                shift_group = QGroupBox(f"{day} {start} - {end}")
+                shift_group.setStyleSheet("background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 5px;")
+                shift_layout = QVBoxLayout()
+                
+                # If we have alternative solutions
+                if shift_key in self.alternative_solutions and self.alternative_solutions[shift_key]:
+                    alternatives = self.alternative_solutions[shift_key]
+                    
+                    # Add a label explaining the alternatives
+                    alt_label = QLabel(f"The following workers are available but would exceed their hour limits:")
+                    alt_label.setWordWrap(True)
+                    shift_layout.addWidget(alt_label)
+                    
+                    # Add each alternative worker
+                    for worker in alternatives:
+                        worker_label = QLabel(f"• {worker}")
+                        worker_label.setStyleSheet("font-weight: bold;")
+                        shift_layout.addWidget(worker_label)
+                    
+                    # Add suggestion
+                    suggestion = QLabel("Suggestion: Consider increasing their max hours or reassigning other shifts.")
+                    suggestion.setStyleSheet("font-style: italic;")
+                    suggestion.setWordWrap(True)
+                    shift_layout.addWidget(suggestion)
+                else:
+                    # No alternatives available
+                    no_alt_label = QLabel("No workers are available for this shift, even with extended hours.")
+                    no_alt_label.setWordWrap(True)
+                    shift_layout.addWidget(no_alt_label)
+                    
+                    suggestion = QLabel("Suggestion: Consider adjusting hours of operation or recruiting more workers with availability during this time.")
+                    suggestion.setStyleSheet("font-style: italic;")
+                    suggestion.setWordWrap(True)
+                    shift_layout.addWidget(suggestion)
+                
+                shift_group.setLayout(shift_layout)
+                scroll_layout.addWidget(shift_group)
+        
+        scroll_content.setLayout(scroll_layout)
+        scroll_area.setWidget(scroll_content)
+        layout.addWidget(scroll_area)
+        
+        # Close button
+        close_btn = StyleHelper.create_button("Close", primary=False)
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+        
+        self.setLayout(layout)
 
 class WorkplaceTab(QWidget):
     """Tab for managing a specific workplace"""
@@ -1451,7 +1605,7 @@ class WorkplaceTab(QWidget):
             hours_of_operation = self.app_data[self.workplace]['hours_of_operation']
             
             # generate schedule
-            schedule, assigned_hours, low_hour_workers, unassigned_workers = create_shifts_from_availability(
+            schedule, assigned_hours, low_hour_workers, unassigned_workers, alternative_solutions, unfilled_shifts = create_shifts_from_availability(
                 hours_of_operation,
                 workers,
                 self.workplace,
@@ -1461,6 +1615,11 @@ class WorkplaceTab(QWidget):
             
             # close dialog
             dialog.accept()
+            
+            # Show alternative solutions dialog if there are unfilled shifts
+            if unfilled_shifts:
+                alt_dialog = AlternativeSolutionsDialog(alternative_solutions, unfilled_shifts, self)
+                alt_dialog.exec_()
             
             # show schedule
             self.show_schedule_dialog(schedule, assigned_hours, low_hour_workers, unassigned_workers, workers)
@@ -1654,15 +1813,37 @@ class WorkplaceTab(QWidget):
         
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Edit Shift: {day} {format_time_ampm(shift['start'])} - {format_time_ampm(shift['end'])}")
-        dialog.setMinimumWidth(400)
+        dialog.setMinimumWidth(500)  # Increased width
+        dialog.setMinimumHeight(500)  # Increased height
         
         layout = QVBoxLayout()
         
         # Get available workers for this shift
         available_workers = shift.get('all_available', [])
         
+        # Add a label explaining what to do
+        instruction_label = QLabel(f"Select workers for {day} {format_time_ampm(shift['start'])} - {format_time_ampm(shift['end'])}:")
+        instruction_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(instruction_label)
+        
+        # Add a note about availability
+        if not available_workers:
+            no_workers_label = QLabel("No workers are available during this time slot based on their availability.")
+            no_workers_label.setStyleSheet("color: red;")
+            no_workers_label.setWordWrap(True)
+            layout.addWidget(no_workers_label)
+            
+            # Show all workers anyway
+            all_workers_label = QLabel("Showing all workers. You can assign them, but they may not be available during this time.")
+            all_workers_label.setWordWrap(True)
+            layout.addWidget(all_workers_label)
+            
+            # Use all workers instead
+            available_workers = all_workers
+        
         # Create list of workers
         worker_list = QListWidget()
+        worker_list.setStyleSheet("QListWidget::item { padding: 5px; }")
         
         # Add all available workers
         for worker in available_workers:
@@ -1678,14 +1859,16 @@ class WorkplaceTab(QWidget):
             worker_list.setSelectionMode(QListWidget.NoSelection)
             worker_list.addItem(item)
         
-        layout.addWidget(QLabel(f"Select workers for {day} {format_time_ampm(shift['start'])} - {format_time_ampm(shift['end'])}:"))
         layout.addWidget(worker_list)
         
         # Buttons
         buttons_layout = QHBoxLayout()
         
         save_btn = StyleHelper.create_button("Save")
+        save_btn.setMinimumWidth(120)  # Wider button
+        
         cancel_btn = StyleHelper.create_button("Cancel", primary=False)
+        cancel_btn.setMinimumWidth(120)  # Wider button
         
         buttons_layout.addWidget(save_btn)
         buttons_layout.addWidget(cancel_btn)
