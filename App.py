@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QFileDialog, QMessageBox, QTabWidget, QLineEdit, QCheckBox,
                             QTimeEdit, QSpinBox, QFormLayout, QGroupBox, QTextEdit, QDialog,
                             QScrollArea, QFrame, QSplitter, QStackedWidget, QListWidget,
-                            QGridLayout, QTimeEdit, QHeaderView)
+                            QGridLayout, QTimeEdit, QHeaderView, QListWidgetItem)
 from PyQt5.QtCore import Qt, QTime, QSize, QSettings, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QColor, QPalette
 
@@ -77,27 +77,53 @@ def save_data(data):
         logging.error(f"Error saving data: {str(e)}")
         return False
 
-def parse_not_available(raw_string):
-    """Parse not available times from string format"""
+def parse_availability(raw_string):
+    """Parse availability times from string format (e.g., 'Monday 12:00-15:00, Monday 20:00-00:00')"""
     if pd.isna(raw_string) or not raw_string:
         return {}
         
     day_map = {
-        "sun": "Sunday", "mon": "Monday", "tue": "Tuesday",
-        "wed": "Wednesday", "thu": "Thursday", "fri": "Friday", "sat": "Saturday"
+        "sunday": "Sunday", "sun": "Sunday",
+        "monday": "Monday", "mon": "Monday",
+        "tuesday": "Tuesday", "tue": "Tuesday",
+        "wednesday": "Wednesday", "wed": "Wednesday",
+        "thursday": "Thursday", "thu": "Thursday",
+        "friday": "Friday", "fri": "Friday",
+        "saturday": "Saturday", "sat": "Saturday"
     }
-    not_available = {}
     
+    availability = {}
+    
+    # Split by commas and process each block
     blocks = re.split(r',\s*', str(raw_string))
     for block in blocks:
-        match = re.match(r'(\w+)\s*(\d{1,2})\s*[-to]+\s*(\d{1,2})', block, re.IGNORECASE)
+        # Match pattern like "Monday 12:00-15:00"
+        match = re.match(r'(\w+)\s+(\d{1,2}:\d{2})-(\d{1,2}:\d{2})', block.strip(), re.IGNORECASE)
         if match:
-            day_raw, start, end = match.groups()
-            day_key = day_map.get(day_raw[:3].lower(), None)
+            day_raw, start_time, end_time = match.groups()
+            day_key = day_map.get(day_raw.lower(), None)
+            
             if day_key:
-                not_available.setdefault(day_key, []).append((int(start), int(end)))
+                # Convert times to decimal hours for easier comparison
+                start_hour = time_to_hour(start_time)
+                end_hour = time_to_hour(end_time)
+                
+                # Handle overnight shifts (e.g., 22:00-02:00)
+                if end_hour < start_hour:
+                    end_hour += 24
+                
+                # Add to availability dictionary
+                if day_key not in availability:
+                    availability[day_key] = []
+                
+                availability[day_key].append({
+                    "start": start_time,
+                    "end": end_time,
+                    "start_hour": start_hour,
+                    "end_hour": end_hour
+                })
     
-    return not_available
+    return availability
 
 def time_to_hour(t):
     """Convert time string to decimal hour (e.g. '14:30' -> 14.5)"""
@@ -130,17 +156,25 @@ def overlaps(start1, end1, start2, end2):
     return max(start1, start2) < min(end1, end2)
 
 def is_worker_available(worker, day, shift_start, shift_end):
-    """Check if a worker is available for a given shift"""
-    # first check if they're generally available that day
-    if not worker['availability'].get(day, False):
+    """Check if a worker is available for a given shift based on their availability"""
+    # Get worker's availability for this day
+    day_availability = worker.get('availability', {}).get(day, [])
+    
+    # If no specific availability is defined for this day, worker is not available
+    if not day_availability:
         return False
     
-    # then check if the shift overlaps with any of their unavailable times
-    for block in worker.get('not_available', {}).get(day, []):
-        if overlaps(shift_start, shift_end, block[0], block[1]):
-            return False
+    # Check if the shift overlaps with any of the worker's available times
+    for avail in day_availability:
+        avail_start = avail['start_hour']
+        avail_end = avail['end_hour']
+        
+        # If the shift is completely within an available block, worker is available
+        if avail_start <= shift_start and shift_end <= avail_end:
+            return True
     
-    return True
+    # If we get here, no available block fully contains the shift
+    return False
 
 def create_shifts_from_availability(hours_of_operation, workers, workplace, max_hours_per_worker, max_workers_per_shift):
     """Create shifts based on hours of operation and worker availability"""
@@ -159,7 +193,7 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
     assigned_days = {w['email']: set() for w in workers}
     
     # track if a worker is work study (limited to 5 hours per week)
-    work_study_status = {w['email']: w['work_study'] for w in workers}
+    work_study_status = {w['email']: w.get('work_study', False) for w in workers}
     
     # for each day in the week
     for day, operation_hours in hours_of_operation.items():
@@ -238,7 +272,7 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
     # identify workers with low hours
     low_hour_workers = []
     for w in workers:
-        if not w['work_study'] and assigned_hours[w['email']] < 4:
+        if not work_study_status.get(w['email'], False) and assigned_hours[w['email']] < 4:
             low_hour_workers.append(f"{w['first_name']} {w['last_name']}")
     
     return schedule, assigned_hours, low_hour_workers
@@ -650,12 +684,9 @@ class WorkplaceTab(QWidget):
                 table.setItem(i, 3, QTableWidgetItem(str(work_study)))
                 
                 # availability
-                availability = []
-                for day in DAYS:
-                    if str(row.get(day, "No")).strip().lower() in ['yes', 'y', 'true']:
-                        availability.append(day[:3])
-                
-                table.setItem(i, 4, QTableWidgetItem(", ".join(availability)))
+                avail_column = next((col for col in df.columns if 'available' in col.lower()), None)
+                availability_text = str(row.get(avail_column, "")) if avail_column else ""
+                table.setItem(i, 4, QTableWidgetItem(availability_text))
                 
                 # actions
                 actions_widget = QWidget()
@@ -748,7 +779,7 @@ class WorkplaceTab(QWidget):
         """Show dialog to add a worker"""
         dialog = QDialog(self)
         dialog.setWindowTitle("Add Worker")
-        dialog.setMinimumWidth(400)
+        dialog.setMinimumWidth(500)
         
         layout = QVBoxLayout()
         
@@ -772,22 +803,10 @@ class WorkplaceTab(QWidget):
         form_layout.addRow("Work Study:", work_study_combo)
         
         # availability
-        avail_group = QGroupBox("Availability")
-        avail_layout = QVBoxLayout()
-        
-        day_checkboxes = {}
-        for day in DAYS:
-            checkbox = QCheckBox(day)
-            avail_layout.addWidget(checkbox)
-            day_checkboxes[day] = checkbox
-        
-        avail_group.setLayout(avail_layout)
-        form_layout.addRow("", avail_group)
-        
-        # not available
-        not_avail_input = QLineEdit()
-        not_avail_input.setPlaceholderText("e.g. Mon 12-2, Wed 1-3")
-        form_layout.addRow("Not Available:", not_avail_input)
+        avail_input = QTextEdit()
+        avail_input.setPlaceholderText("Enter availability in format: Day HH:MM-HH:MM\nExample: Monday 12:00-15:00, Monday 20:00-00:00, Tuesday 12:00-15:00")
+        avail_input.setMinimumHeight(100)
+        form_layout.addRow("Days & Times Available:", avail_input)
         
         layout.addLayout(form_layout)
         
@@ -812,15 +831,14 @@ class WorkplaceTab(QWidget):
             last_name_input.text(),
             email_input.text(),
             work_study_combo.currentText(),
-            {day: checkbox.isChecked() for day, checkbox in day_checkboxes.items()},
-            not_avail_input.text()
+            avail_input.toPlainText()
         ))
         
         cancel_btn.clicked.connect(dialog.reject)
         
         dialog.exec_()
     
-    def save_worker(self, dialog, table, first_name, last_name, email, work_study, availability, not_available):
+    def save_worker(self, dialog, table, first_name, last_name, email, work_study, availability):
         """Save worker to Excel file"""
         if not first_name or not last_name or not email:
             QMessageBox.warning(dialog, "Warning", "First name, last name, and email are required.")
@@ -849,20 +867,16 @@ class WorkplaceTab(QWidget):
                 }
                 
                 # add availability
-                for day in DAYS:
-                    new_row[day] = "Yes" if availability.get(day, False) else "No"
-                
-                # add not available
-                not_avail_column = next((col for col in df.columns if 'not avail' in col.lower()), None)
-                if not_avail_column:
-                    new_row[not_avail_column] = not_available
+                avail_column = next((col for col in df.columns if 'available' in col.lower()), None)
+                if avail_column:
+                    new_row[avail_column] = availability
                 
                 # append row
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
                 
             else:
                 # create new file
-                columns = ["First Name", "Last Name", "Email", "Work Study"] + DAYS + ["Days / Times Not Available"]
+                columns = ["First Name", "Last Name", "Email", "Work Study", "Days & Times Available"]
                 df = pd.DataFrame(columns=columns)
                 
                 # create new row
@@ -870,15 +884,9 @@ class WorkplaceTab(QWidget):
                     "First Name": first_name,
                     "Last Name": last_name,
                     "Email": email,
-                    "Work Study": work_study
+                    "Work Study": work_study,
+                    "Days & Times Available": availability
                 }
-                
-                # add availability
-                for day in DAYS:
-                    new_row[day] = "Yes" if availability.get(day, False) else "No"
-                
-                # add not available
-                new_row["Days / Times Not Available"] = not_available
                 
                 # append row
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
@@ -920,7 +928,7 @@ class WorkplaceTab(QWidget):
             # create dialog
             dialog = QDialog(self)
             dialog.setWindowTitle("Edit Worker")
-            dialog.setMinimumWidth(400)
+            dialog.setMinimumWidth(500)
             
             layout = QVBoxLayout()
             
@@ -949,26 +957,13 @@ class WorkplaceTab(QWidget):
             form_layout.addRow("Work Study:", work_study_combo)
             
             # availability
-            avail_group = QGroupBox("Availability")
-            avail_layout = QVBoxLayout()
-            
-            day_checkboxes = {}
-            for day in DAYS:
-                checkbox = QCheckBox(day)
-                checkbox.setChecked(str(worker_row.get(day, "No")).strip().lower() in ['yes', 'y', 'true'])
-                avail_layout.addWidget(checkbox)
-                day_checkboxes[day] = checkbox
-            
-            avail_group.setLayout(avail_layout)
-            form_layout.addRow("", avail_group)
-            
-            # not available
-            not_avail_column = next((col for col in df.columns if 'not avail' in col.lower()), None)
-            not_avail_input = QLineEdit()
-            if not_avail_column:
-                not_avail_input.setText(str(worker_row.get(not_avail_column, "")))
-            not_avail_input.setPlaceholderText("e.g. Mon 12-2, Wed 1-3")
-            form_layout.addRow("Not Available:", not_avail_input)
+            avail_column = next((col for col in df.columns if 'available' in col.lower()), None)
+            avail_input = QTextEdit()
+            if avail_column:
+                avail_input.setText(str(worker_row.get(avail_column, "")))
+            avail_input.setPlaceholderText("Enter availability in format: Day HH:MM-HH:MM\nExample: Monday 12:00-15:00, Monday 20:00-00:00, Tuesday 12:00-15:00")
+            avail_input.setMinimumHeight(100)
+            form_layout.addRow("Days & Times Available:", avail_input)
             
             layout.addLayout(form_layout)
             
@@ -993,8 +988,7 @@ class WorkplaceTab(QWidget):
                 first_name_input.text(),
                 last_name_input.text(),
                 work_study_combo.currentText(),
-                {day: checkbox.isChecked() for day, checkbox in day_checkboxes.items()},
-                not_avail_input.text()
+                avail_input.toPlainText()
             ))
             
             cancel_btn.clicked.connect(dialog.reject)
@@ -1005,7 +999,7 @@ class WorkplaceTab(QWidget):
             logging.error(f"Error editing worker: {str(e)}")
             QMessageBox.critical(self, "Error", f"Error editing worker: {str(e)}")
     
-    def update_worker(self, dialog, table, email, first_name, last_name, work_study, availability, not_available):
+    def update_worker(self, dialog, table, email, first_name, last_name, work_study, availability):
         """Update worker in Excel file"""
         if not first_name or not last_name:
             QMessageBox.warning(dialog, "Warning", "First name and last name are required.")
@@ -1030,13 +1024,9 @@ class WorkplaceTab(QWidget):
             df.loc[mask, "Work Study"] = work_study
             
             # update availability
-            for day in DAYS:
-                df.loc[mask, day] = "Yes" if availability.get(day, False) else "No"
-            
-            # update not available
-            not_avail_column = next((col for col in df.columns if 'not avail' in col.lower()), None)
-            if not_avail_column:
-                df.loc[mask, not_avail_column] = not_available
+            avail_column = next((col for col in df.columns if 'available' in col.lower()), None)
+            if avail_column:
+                df.loc[mask, avail_column] = availability
             
             # save file
             df.to_excel(file_path, index=False)
@@ -1329,17 +1319,19 @@ class WorkplaceTab(QWidget):
             
             workers = []
             for _, row in df.iterrows():
-                availability = {day: str(row.get(day, "No")).strip().lower() in ['yes', 'y', 'true'] for day in DAYS}
-                not_avail_column = next((col for col in row.index if 'not avail' in col.lower()), None)
-                not_available = parse_not_available(row.get(not_avail_column, "")) if not_avail_column else {}
+                # Get availability from the "Days & Times Available" column
+                avail_column = next((col for col in df.columns if 'available' in col.lower()), None)
+                availability_text = str(row.get(avail_column, "")) if avail_column else ""
+                
+                # Parse availability into structured format
+                availability = parse_availability(availability_text)
                 
                 workers.append({
                     "first_name": row.get("First Name", "").strip(),
                     "last_name": row.get("Last Name", "").strip(),
                     "email": row.get("Email", "").strip(),
                     "work_study": str(row.get("Work Study", "")).strip().lower() in ['yes', 'y', 'true'],
-                    "availability": availability,
-                    "not_available": not_available
+                    "availability": availability
                 })
             
             # get hours of operation
