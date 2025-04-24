@@ -211,6 +211,9 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
     # Define possible shift lengths
     shift_lengths = [2, 3, 4, 5]  # 2, 3, 4, and 5 hour shifts
     
+    # Randomize the order of shift lengths for more variety in schedules
+    random.shuffle(shift_lengths)
+    
     # track assigned hours per worker
     assigned_hours = {w['email']: 0 for w in workers}
     assigned_days = {w['email']: set() for w in workers}
@@ -220,6 +223,7 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
     
     # Identify work study students who need exactly 5 hours
     work_study_workers = [w for w in workers if work_study_status[w['email']]]
+    random.shuffle(work_study_workers)  # Randomize order for variety
     
     # First, try to assign 5-hour shifts to work study students
     for worker in work_study_workers:
@@ -244,8 +248,12 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
                 
                 # Check if operation period is at least 5 hours
                 if end_hour - start_hour >= 5:
+                    # Get all possible 5-hour blocks and randomize them
+                    possible_starts = [start_hour + i for i in range(int(end_hour - start_hour - 5) + 1)]
+                    random.shuffle(possible_starts)
+                    
                     # Try to find a 5-hour block where the worker is available
-                    for potential_start in [start_hour + i for i in range(int(end_hour - start_hour - 5) + 1)]:
+                    for potential_start in possible_starts:
                         potential_end = potential_start + 5
                         
                         if is_worker_available(worker, day, potential_start, potential_end):
@@ -280,15 +288,23 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
                 break
     
     # Now create regular shifts for the remaining time slots
-    for day, operation_hours in hours_of_operation.items():
+    days_list = list(hours_of_operation.keys())
+    random.shuffle(days_list)  # Randomize days for variety
+    
+    for day in days_list:
+        operation_hours = hours_of_operation[day]
         if not operation_hours:
             continue  # skip days with no hours of operation
             
         if day not in schedule:
             schedule[day] = []
         
+        # Randomize operation hours for variety
+        random_operation_hours = operation_hours.copy()
+        random.shuffle(random_operation_hours)
+        
         # for each operation period in the day (e.g., morning and evening blocks)
-        for op in operation_hours:
+        for op in random_operation_hours:
             start_hour = time_to_hour(op['start'])
             end_hour = time_to_hour(op['end'])
             
@@ -335,12 +351,16 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
                 if not possible_lengths:
                     possible_lengths = [2]  # Default to 2-hour shifts if nothing else fits
                 
-                # Sort by preference (try to use longer shifts first, except prioritize 5-hour for work study)
-                possible_lengths.sort(reverse=True)
+                # Randomize shift lengths for variety
+                random.shuffle(possible_lengths)
                 
                 # Create shifts to cover the entire slot
                 current_hour = slot_start
                 while current_hour < slot_end:
+                    # Randomize the shift length selection
+                    # This makes the schedule different each time
+                    random.shuffle(possible_lengths)
+                    
                     # Find the best shift length that fits
                     shift_length = None
                     for length in possible_lengths:
@@ -374,7 +394,8 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
                                 # add to available workers
                                 available_workers.append(worker)
                     
-                    # sort workers by assigned hours (least to most)
+                    # Randomize the order of workers with the same hours
+                    # This ensures different workers get assigned even with the same hours
                     available_workers.sort(key=lambda w: (assigned_hours[w['email']], random.random()))
                     
                     # assign workers to shift (up to max_workers_per_shift)
@@ -541,7 +562,7 @@ def send_schedule_email(workplace, schedule, recipient_emails, sender_email, sen
     
     except Exception as e:
         logging.error(f"Error sending email: {str(e)}")
-        return False, f"Error sending email: {str(e)}"
+        return False, f"Error sending email: {str(e)}\n\nNote: For Gmail, you may need to use an App Password instead of your regular password. Go to your Google Account > Security > App Passwords to create one."
 
 def create_schedule_image(workplace, schedule):
     """Create an image of the schedule"""
@@ -2495,6 +2516,12 @@ class WorkplaceTab(QWidget):
         sender_password_input.setEchoMode(QLineEdit.Password)
         form_layout.addRow("Sender Password:", sender_password_input)
         
+        # Add note about Gmail app passwords
+        gmail_note = QLabel("Note: For Gmail, you may need to use an App Password instead of your regular password. Go to your Google Account > Security > App Passwords to create one.")
+        gmail_note.setWordWrap(True)
+        gmail_note.setStyleSheet("font-style: italic; color: #666;")
+        form_layout.addRow("", gmail_note)
+        
         # recipients
         recipients_input = QTextEdit()
         recipients_input.setPlaceholderText("Enter email addresses, one per line")
@@ -2564,22 +2591,30 @@ class WorkplaceTab(QWidget):
     def print_schedule(self, schedule):
         """Print the schedule"""
         try:
-            # Create a temporary HTML file for printing
-            html_content = """
+            # Create a printer
+            printer = QPrinter()
+            
+            # Create a print dialog
+            print_dialog = QPrintDialog(printer, self)
+            if print_dialog.exec_() != QDialog.Accepted:
+                return
+            
+            # Create the HTML content for printing
+            html_content = f"""
             <html>
             <head>
                 <style>
-                    body { font-family: Arial, sans-serif; }
-                    h1 { text-align: center; }
-                    h2 { margin-top: 20px; }
-                    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-                    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-                    th { background-color: #f2f2f2; }
-                    .unfilled { color: red; }
+                    body {{ font-family: Arial, sans-serif; }}
+                    h1 {{ text-align: center; }}
+                    h2 {{ margin-top: 20px; }}
+                    table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
+                    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                    th {{ background-color: #f2f2f2; }}
+                    .unfilled {{ color: red; }}
                 </style>
             </head>
             <body>
-                <h1>""" + self.workplace.replace('_', ' ').title() + """ Schedule</h1>
+                <h1>{self.workplace.replace('_', ' ').title()} Schedule</h1>
             """
             
             # Add each day's schedule
@@ -2606,36 +2641,19 @@ class WorkplaceTab(QWidget):
             </html>
             """
             
-            # Create print dialog
-            printer = QPrinter()
-            preview = QPrintPreviewDialog(printer)
-            preview.paintRequested.connect(lambda p: self.print_html(p, html_content))
-            preview.exec_()
+            # Create a QTextDocument to render the HTML
+            from PyQt5.QtGui import QTextDocument
+            document = QTextDocument()
+            document.setHtml(html_content)
+            
+            # Print the document
+            document.print_(printer)
+            
+            QMessageBox.information(self, "Success", "Schedule sent to printer.")
             
         except Exception as e:
             logging.error(f"Error printing schedule: {str(e)}")
             QMessageBox.critical(self, "Error", f"Error printing schedule: {str(e)}")
-    
-    def print_html(self, printer, html_content):
-        """Print HTML content"""
-        from PyQt5.QtWebEngineWidgets import QWebEngineView
-        from PyQt5.QtCore import QUrl
-        
-        # Create a temporary file
-        import tempfile
-        temp_file = tempfile.NamedTemporaryFile(suffix='.html', delete=False)
-        temp_file.write(html_content.encode('utf-8'))
-        temp_file.close()
-        
-        # Create web view and load the HTML
-        web = QWebEngineView()
-        web.load(QUrl.fromLocalFile(temp_file.name))
-        
-        # Wait for the page to load
-        def print_page():
-            web.page().print(printer, lambda _: None)
-        
-        web.loadFinished.connect(print_page)
     
     def view_current_schedule(self):
         """View current saved schedule"""
