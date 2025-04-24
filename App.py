@@ -191,7 +191,7 @@ def find_alternative_workers(workers, day, shift_start, shift_end, assigned_hour
         if is_worker_available(worker, day, shift_start, shift_end):
             # Check if adding this shift would exceed max hours
             shift_hours = shift_end - shift_start
-            if assigned_hours.get(email, 0) + shift_hours <= max_hours_per_worker:
+            if assigned_hours.get(email, 0) + shift_hours <= max_hours_per_worker * 1.5: # Allow exceeding max hours for alternatives
                 alternatives.append(worker)
     
     # Sort by assigned hours (least to most)
@@ -204,27 +204,84 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
     schedule = {}
     unfilled_shifts = []
     
-    # determine ideal shift length based on workplace
-    if "lounge" in workplace.lower() or "arena" in workplace.lower():
-        ideal_shift_length = 3  # 3-hour shifts for lounges/arenas
-    else:
-        ideal_shift_length = 4  # 4-hour shifts for other workplaces
-    
-    min_shift_length = 2  # minimum shift length in hours
+    # Define possible shift lengths
+    shift_lengths = [2, 3, 4, 5]  # 2, 3, 4, and 5 hour shifts
     
     # track assigned hours per worker
     assigned_hours = {w['email']: 0 for w in workers}
     assigned_days = {w['email']: set() for w in workers}
     
-    # track if a worker is work study (limited to 5 hours per week)
+    # track if a worker is work study (limited to exactly 5 hours per week)
     work_study_status = {w['email']: w.get('work_study', False) for w in workers}
     
-    # for each day in the week
+    # Identify work study students who need exactly 5 hours
+    work_study_workers = [w for w in workers if work_study_status[w['email']]]
+    
+    # First, try to assign 5-hour shifts to work study students
+    for worker in work_study_workers:
+        email = worker['email']
+        
+        # Skip if already assigned 5 hours
+        if assigned_hours[email] >= 5:
+            continue
+            
+        # Find a suitable 5-hour shift for this worker
+        for day, operation_hours in hours_of_operation.items():
+            if not operation_hours:
+                continue
+                
+            for op in operation_hours:
+                start_hour = time_to_hour(op['start'])
+                end_hour = time_to_hour(op['end'])
+                
+                # Skip if invalid hours
+                if end_hour <= start_hour:
+                    end_hour += 24  # handle overnight shifts
+                
+                # Check if operation period is at least 5 hours
+                if end_hour - start_hour >= 5:
+                    # Try to find a 5-hour block where the worker is available
+                    for potential_start in [start_hour + i for i in range(int(end_hour - start_hour - 5) + 1)]:
+                        potential_end = potential_start + 5
+                        
+                        if is_worker_available(worker, day, potential_start, potential_end):
+                            # Initialize day in schedule if not exists
+                            if day not in schedule:
+                                schedule[day] = []
+                            
+                            # Add the 5-hour shift
+                            schedule[day].append({
+                                "start": hour_to_time_str(potential_start),
+                                "end": hour_to_time_str(potential_end),
+                                "assigned": [f"{worker['first_name']} {worker['last_name']}"],
+                                "available": [f"{worker['first_name']} {worker['last_name']}"],
+                                "raw_assigned": [email],
+                                "all_available": [worker],
+                                "is_work_study": True
+                            })
+                            
+                            # Update assigned hours
+                            assigned_hours[email] = 5
+                            assigned_days[email].add(day)
+                            
+                            # Break once we've assigned a 5-hour shift
+                            break
+                    
+                    # Break if we've assigned 5 hours
+                    if assigned_hours[email] >= 5:
+                        break
+            
+            # Break if we've assigned 5 hours
+            if assigned_hours[email] >= 5:
+                break
+    
+    # Now create regular shifts for the remaining time slots
     for day, operation_hours in hours_of_operation.items():
         if not operation_hours:
             continue  # skip days with no hours of operation
             
-        schedule[day] = []
+        if day not in schedule:
+            schedule[day] = []
         
         # for each operation period in the day (e.g., morning and evening blocks)
         for op in operation_hours:
@@ -235,37 +292,83 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
             if end_hour <= start_hour:
                 end_hour += 24  # handle overnight shifts
             
-            total_hours = end_hour - start_hour
+            # Check if there are any existing shifts for this day (from work study assignments)
+            existing_shifts = [s for s in schedule[day] if 
+                              overlaps(time_to_hour(s['start']), time_to_hour(s['end']), start_hour, end_hour)]
             
-            # create shifts based on ideal shift length
-            current_hour = start_hour
-            while current_hour < end_hour:
-                # determine shift end time (not exceeding operation end)
-                shift_end = min(current_hour + ideal_shift_length, end_hour)
+            # Create a list of time slots that need to be filled
+            time_slots_to_fill = [(start_hour, end_hour)]
+            
+            # Remove time slots that are already covered by existing shifts
+            for shift in existing_shifts:
+                shift_start = time_to_hour(shift['start'])
+                shift_end = time_to_hour(shift['end'])
                 
-                # if remaining time is too short, extend the previous shift
-                if end_hour - shift_end < min_shift_length and shift_end < end_hour:
-                    shift_end = end_hour
+                new_time_slots = []
+                for slot_start, slot_end in time_slots_to_fill:
+                    # If the slot is completely before or after the shift, keep it as is
+                    if slot_end <= shift_start or slot_start >= shift_end:
+                        new_time_slots.append((slot_start, slot_end))
+                    else:
+                        # If the slot overlaps with the shift, split it
+                        if slot_start < shift_start:
+                            new_time_slots.append((slot_start, shift_start))
+                        if slot_end > shift_end:
+                            new_time_slots.append((shift_end, slot_end))
                 
-                # only create the shift if it meets minimum length
-                if shift_end - current_hour >= min_shift_length:
+                time_slots_to_fill = new_time_slots
+            
+            # For each remaining time slot, create shifts
+            for slot_start, slot_end in time_slots_to_fill:
+                slot_duration = slot_end - slot_start
+                
+                # Skip if slot is too short
+                if slot_duration < 2:
+                    continue
+                
+                # Determine which shift lengths to try for this slot
+                possible_lengths = [l for l in shift_lengths if l <= slot_duration]
+                if not possible_lengths:
+                    possible_lengths = [2]  # Default to 2-hour shifts if nothing else fits
+                
+                # Sort by preference (try to use longer shifts first, except prioritize 5-hour for work study)
+                possible_lengths.sort(reverse=True)
+                
+                # Create shifts to cover the entire slot
+                current_hour = slot_start
+                while current_hour < slot_end:
+                    # Find the best shift length that fits
+                    shift_length = None
+                    for length in possible_lengths:
+                        if current_hour + length <= slot_end:
+                            shift_length = length
+                            break
+                    
+                    # If no shift length fits, use the smallest one and cap at slot_end
+                    if shift_length is None:
+                        shift_length = min(possible_lengths)
+                    
+                    shift_end_hour = min(current_hour + shift_length, slot_end)
+                    
                     # find available workers for this shift
                     available_workers = []
                     for worker in workers:
                         email = worker['email']
                         
+                        # Skip work study workers who already have their 5 hours
+                        if work_study_status[email] and assigned_hours[email] >= 5:
+                            continue
+                        
+                        # Skip work study workers for shifts that aren't 5 hours (unless they already have some hours)
+                        if work_study_status[email] and assigned_hours[email] == 0 and (shift_end_hour - current_hour) != 5:
+                            continue
+                            
                         # check if worker is available
-                        if is_worker_available(worker, day, current_hour, shift_end):
-                            # check work study limit (5 hours per week)
-                            if work_study_status[email] and assigned_hours.get(email, 0) + (shift_end - current_hour) > 5:
-                                continue
-                                
+                        if is_worker_available(worker, day, current_hour, shift_end_hour):
                             # check max hours per worker limit
-                            if assigned_hours.get(email, 0) + (shift_end - current_hour) > max_hours_per_worker:
-                                continue
-                                
-                            # add to available workers
-                            available_workers.append(worker)
+                            if assigned_hours.get(email, 0) + (shift_end_hour - current_hour) <= max_hours_per_worker:
+                                # add to available workers
+                                available_workers.append(worker)
                     
                     # sort workers by assigned hours (least to most)
                     available_workers.sort(key=lambda w: (assigned_hours[w['email']], random.random()))
@@ -277,7 +380,7 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
                         
                         # update worker's hours
                         email = worker['email']
-                        assigned_hours[email] += (shift_end - current_hour)
+                        assigned_hours[email] += (shift_end_hour - current_hour)
                         assigned_days[email].add(day)
                     
                     # Check if shift is unfilled
@@ -285,23 +388,23 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
                         unfilled_shifts.append({
                             "day": day,
                             "start": hour_to_time_str(current_hour),
-                            "end": hour_to_time_str(shift_end),
+                            "end": hour_to_time_str(shift_end_hour),
                             "start_hour": current_hour,
-                            "end_hour": shift_end
+                            "end_hour": shift_end_hour
                         })
                     
                     # add shift to schedule
                     schedule[day].append({
                         "start": hour_to_time_str(current_hour),
-                        "end": hour_to_time_str(shift_end),
+                        "end": hour_to_time_str(shift_end_hour),
                         "assigned": [f"{w['first_name']} {w['last_name']}" for w in assigned] if assigned else ["Unfilled"],
                         "available": [f"{w['first_name']} {w['last_name']}" for w in available_workers],
                         "raw_assigned": [w['email'] for w in assigned] if assigned else [],
                         "all_available": [w for w in available_workers]  # store all available workers for editing
                     })
-                
-                # move to next shift
-                current_hour = shift_end
+                    
+                    # move to next shift
+                    current_hour = shift_end_hour
     
     # identify workers with low hours
     low_hour_workers = []
@@ -314,6 +417,14 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
     for w in workers:
         if assigned_hours[w['email']] == 0:
             unassigned_workers.append(f"{w['first_name']} {w['last_name']}")
+    
+    # Check for work study students who didn't get exactly 5 hours
+    work_study_issues = []
+    for w in workers:
+        if work_study_status.get(w['email'], False):
+            hours = assigned_hours.get(w['email'], 0)
+            if hours != 5:
+                work_study_issues.append(f"{w['first_name']} {w['last_name']} ({hours} hours)")
     
     # Find alternative solutions for unfilled shifts
     alternative_solutions = {}
@@ -338,7 +449,7 @@ def create_shifts_from_availability(hours_of_operation, workers, workplace, max_
                 f"{w['first_name']} {w['last_name']}" for w in alternatives
             ]
     
-    return schedule, assigned_hours, low_hour_workers, unassigned_workers, alternative_solutions, unfilled_shifts
+    return schedule, assigned_hours, low_hour_workers, unassigned_workers, alternative_solutions, unfilled_shifts, work_study_issues
 
 def send_schedule_email(workplace, schedule, recipient_emails, sender_email, sender_password):
     """Send schedule via email"""
@@ -809,10 +920,11 @@ class HoursOfOperationDialog(QDialog):
 class AlternativeSolutionsDialog(QDialog):
     """Dialog for showing alternative solutions for unfilled shifts"""
     
-    def __init__(self, alternative_solutions, unfilled_shifts, parent=None):
+    def __init__(self, alternative_solutions, unfilled_shifts, work_study_issues=None, parent=None):
         super().__init__(parent)
         self.alternative_solutions = alternative_solutions
         self.unfilled_shifts = unfilled_shifts
+        self.work_study_issues = work_study_issues or []
         self.initUI()
     
     def initUI(self):
@@ -838,6 +950,29 @@ class AlternativeSolutionsDialog(QDialog):
         
         scroll_content = QWidget()
         scroll_layout = QVBoxLayout(scroll_content)
+        
+        # Work Study Issues
+        if self.work_study_issues:
+            ws_group = QGroupBox("Work Study Issues")
+            ws_group.setStyleSheet("background-color: #fff3cd; border: 1px solid #ffeeba; border-radius: 5px;")
+            ws_layout = QVBoxLayout()
+            
+            ws_label = QLabel("The following work study students don't have exactly 5 hours:")
+            ws_label.setWordWrap(True)
+            ws_layout.addWidget(ws_label)
+            
+            for worker in self.work_study_issues:
+                worker_label = QLabel(f"• {worker}")
+                worker_label.setStyleSheet("font-weight: bold;")
+                ws_layout.addWidget(worker_label)
+            
+            suggestion = QLabel("Suggestion: Work study students must have exactly 5 hours per week. Try adjusting their shifts manually.")
+            suggestion.setStyleSheet("font-style: italic;")
+            suggestion.setWordWrap(True)
+            ws_layout.addWidget(suggestion)
+            
+            ws_group.setLayout(ws_layout)
+            scroll_layout.addWidget(ws_group)
         
         # Check if there are unfilled shifts
         if not self.unfilled_shifts:
@@ -1605,7 +1740,7 @@ class WorkplaceTab(QWidget):
             hours_of_operation = self.app_data[self.workplace]['hours_of_operation']
             
             # generate schedule
-            schedule, assigned_hours, low_hour_workers, unassigned_workers, alternative_solutions, unfilled_shifts = create_shifts_from_availability(
+            schedule, assigned_hours, low_hour_workers, unassigned_workers, alternative_solutions, unfilled_shifts, work_study_issues = create_shifts_from_availability(
                 hours_of_operation,
                 workers,
                 self.workplace,
@@ -1616,9 +1751,9 @@ class WorkplaceTab(QWidget):
             # close dialog
             dialog.accept()
             
-            # Show alternative solutions dialog if there are unfilled shifts
-            if unfilled_shifts:
-                alt_dialog = AlternativeSolutionsDialog(alternative_solutions, unfilled_shifts, self)
+            # Show alternative solutions dialog if there are unfilled shifts or work study issues
+            if unfilled_shifts or work_study_issues:
+                alt_dialog = AlternativeSolutionsDialog(alternative_solutions, unfilled_shifts, work_study_issues, self)
                 alt_dialog.exec_()
             
             # show schedule
