@@ -19,9 +19,10 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QFileDialog, QMessageBox, QTabWidget, QLineEdit, QCheckBox,
                             QTimeEdit, QSpinBox, QFormLayout, QGroupBox, QTextEdit, QDialog,
                             QScrollArea, QFrame, QSplitter, QStackedWidget, QListWidget,
-                            QGridLayout, QHeaderView, QListWidgetItem)
-from PyQt5.QtCore import Qt, QTime, QSize, QSettings, pyqtSignal, QThread
+                            QGridLayout, QHeaderView, QListWidgetItem, QDateEdit, QCalendarWidget)
+from PyQt5.QtCore import Qt, QTime, QSize, QSettings, pyqtSignal, QThread, QDate
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QColor, QPalette
+from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 
 # constants
 DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
@@ -201,6 +202,9 @@ def find_alternative_workers(workers, day, shift_start, shift_end, assigned_hour
 
 def create_shifts_from_availability(hours_of_operation, workers, workplace, max_hours_per_worker, max_workers_per_shift):
     """Create shifts based on hours of operation and worker availability"""
+    # Use timestamp as seed to ensure different schedules each time
+    random.seed(datetime.now().timestamp())
+    
     schedule = {}
     unfilled_shifts = []
     
@@ -519,6 +523,14 @@ def send_schedule_email(workplace, schedule, recipient_emails, sender_email, sen
                 attachment.add_header('Content-Disposition', 'attachment', filename=f"{workplace}_schedule.csv")
                 msg.attach(attachment)
         
+        # create Excel file
+        excel_path = create_schedule_excel(workplace, schedule)
+        if excel_path and os.path.exists(excel_path):
+            with open(excel_path, 'rb') as f:
+                attachment = MIMEApplication(f.read(), _subtype="xlsx")
+                attachment.add_header('Content-Disposition', 'attachment', filename=f"{workplace}_schedule.xlsx")
+                msg.attach(attachment)
+        
         # send email
         with smtplib.SMTP('smtp.gmail.com', 587) as server:
             server.starttls()
@@ -583,8 +595,8 @@ def create_schedule_csv(workplace, schedule):
             for shift in shifts:
                 rows.append({
                     "Day": day,
-                    "Start": shift['start'],
-                    "End": shift['end'],
+                    "Start": format_time_ampm(shift['start']),
+                    "End": format_time_ampm(shift['end']),
                     "Assigned": ", ".join(shift['assigned'])
                 })
         
@@ -604,6 +616,69 @@ def create_schedule_csv(workplace, schedule):
     except Exception as e:
         logging.error(f"Error creating schedule CSV: {str(e)}")
         return None
+
+def create_schedule_excel(workplace, schedule):
+    """Create an Excel file of the schedule"""
+    try:
+        # Create a DataFrame for each day
+        dfs = {}
+        for day in DAYS:
+            if day in schedule and schedule[day]:
+                day_shifts = schedule[day]
+                rows = []
+                for shift in day_shifts:
+                    rows.append({
+                        "Start": format_time_ampm(shift['start']),
+                        "End": format_time_ampm(shift['end']),
+                        "Assigned": ", ".join(shift['assigned'])
+                    })
+                dfs[day] = pd.DataFrame(rows)
+        
+        if not dfs:
+            return None
+        
+        # Create a writer for Excel file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(DIRS['schedules'], f"{workplace}_{timestamp}.xlsx")
+        
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            # Write each day to a separate sheet
+            for day, df in dfs.items():
+                df.to_excel(writer, sheet_name=day, index=False)
+            
+            # Create a summary sheet
+            all_shifts = []
+            for day, shifts in schedule.items():
+                for shift in shifts:
+                    all_shifts.append({
+                        "Day": day,
+                        "Start": format_time_ampm(shift['start']),
+                        "End": format_time_ampm(shift['end']),
+                        "Assigned": ", ".join(shift['assigned'])
+                    })
+            
+            if all_shifts:
+                summary_df = pd.DataFrame(all_shifts)
+                summary_df.to_excel(writer, sheet_name="Full Schedule", index=False)
+        
+        return output_path
+    
+    except Exception as e:
+        logging.error(f"Error creating schedule Excel: {str(e)}")
+        return None
+
+def find_available_workers(workers, day, start_time, end_time):
+    """Find workers available for a specific time slot"""
+    available_workers = []
+    
+    start_hour = time_to_hour(start_time)
+    end_hour = time_to_hour(end_time)
+    
+    for worker in workers:
+        if is_worker_available(worker, day, start_hour, end_hour):
+            available_workers.append(worker)
+    
+    return available_workers
 
 # main application classes
 class StyleHelper:
@@ -653,7 +728,7 @@ class StyleHelper:
             QLabel {
                 color: #333;
             }
-            QLineEdit, QComboBox, QSpinBox, QTimeEdit {
+            QLineEdit, QComboBox, QSpinBox, QTimeEdit, QDateEdit {
                 padding: 6px;
                 border: 1px solid #ccc;
                 border-radius: 4px;
@@ -1038,6 +1113,144 @@ class AlternativeSolutionsDialog(QDialog):
         
         self.setLayout(layout)
 
+class LastMinuteAvailabilityDialog(QDialog):
+    """Dialog for checking last minute availability"""
+    
+    def __init__(self, workplace, parent=None):
+        super().__init__(parent)
+        self.workplace = workplace
+        self.workers = []
+        self.initUI()
+        self.loadWorkers()
+    
+    def initUI(self):
+        self.setWindowTitle(f"Last Minute Availability - {self.workplace.replace('_', ' ').title()}")
+        self.setMinimumWidth(700)
+        self.setMinimumHeight(500)
+        
+        layout = QVBoxLayout()
+        
+        # Title
+        title = QLabel("Check Last Minute Availability")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(title)
+        
+        # Form for selecting day and time
+        form_layout = QFormLayout()
+        
+        # Day selection
+        self.day_combo = QComboBox()
+        self.day_combo.addItems(DAYS)
+        form_layout.addRow("Day:", self.day_combo)
+        
+        # Time selection
+        time_layout = QHBoxLayout()
+        
+        self.start_time = QTimeEdit()
+        self.start_time.setDisplayFormat("HH:mm")
+        self.start_time.setTime(QTime(9, 0))
+        
+        self.end_time = QTimeEdit()
+        self.end_time.setDisplayFormat("HH:mm")
+        self.end_time.setTime(QTime(17, 0))
+        
+        time_layout.addWidget(QLabel("Start:"))
+        time_layout.addWidget(self.start_time)
+        time_layout.addWidget(QLabel("End:"))
+        time_layout.addWidget(self.end_time)
+        
+        form_layout.addRow("Time:", time_layout)
+        
+        layout.addLayout(form_layout)
+        
+        # Check button
+        check_btn = StyleHelper.create_action_button("Check Availability")
+        check_btn.clicked.connect(self.checkAvailability)
+        layout.addWidget(check_btn)
+        
+        # Results table
+        self.results_table = QTableWidget()
+        self.results_table.setColumnCount(3)
+        self.results_table.setHorizontalHeaderLabels(["Name", "Email", "Work Study"])
+        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.results_table)
+        
+        # Close button
+        close_btn = StyleHelper.create_button("Close", primary=False)
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+        
+        self.setLayout(layout)
+    
+    def loadWorkers(self):
+        """Load workers from Excel file"""
+        file_path = os.path.join(DIRS['workplaces'], f"{self.workplace}.xlsx")
+        
+        if not os.path.exists(file_path):
+            QMessageBox.warning(self, "Warning", "No Excel file found for this workplace.")
+            return
+        
+        try:
+            df = pd.read_excel(file_path)
+            df.columns = df.columns.str.strip()
+            
+            # Clean the DataFrame
+            df = df.dropna(subset=['Email'], how='all')
+            df = df[df['Email'].str.strip() != '']
+            df = df[~df['Email'].str.contains('nan', case=False, na=False)]
+            
+            self.workers = []
+            for _, row in df.iterrows():
+                # Get availability from the "Days & Times Available" column
+                avail_column = next((col for col in df.columns if 'available' in col.lower()), None)
+                availability_text = str(row.get(avail_column, "")) if avail_column else ""
+                if pd.isna(availability_text) or availability_text == "nan":
+                    availability_text = ""
+                
+                # Parse availability into structured format
+                availability = parse_availability(availability_text)
+                
+                self.workers.append({
+                    "first_name": row.get("First Name", "").strip(),
+                    "last_name": row.get("Last Name", "").strip(),
+                    "email": row.get("Email", "").strip(),
+                    "work_study": str(row.get("Work Study", "")).strip().lower() in ['yes', 'y', 'true'],
+                    "availability": availability
+                })
+            
+        except Exception as e:
+            logging.error(f"Error loading workers: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error loading workers: {str(e)}")
+    
+    def checkAvailability(self):
+        """Check which workers are available for the selected time"""
+        day = self.day_combo.currentText()
+        start_time = self.start_time.time().toString("HH:mm")
+        end_time = self.end_time.time().toString("HH:mm")
+        
+        # Find available workers
+        available_workers = find_available_workers(self.workers, day, start_time, end_time)
+        
+        # Display results
+        self.results_table.setRowCount(len(available_workers))
+        
+        for i, worker in enumerate(available_workers):
+            # Name
+            name = f"{worker['first_name']} {worker['last_name']}"
+            self.results_table.setItem(i, 0, QTableWidgetItem(name))
+            
+            # Email
+            self.results_table.setItem(i, 1, QTableWidgetItem(worker['email']))
+            
+            # Work Study
+            work_study = "Yes" if worker['work_study'] else "No"
+            self.results_table.setItem(i, 2, QTableWidgetItem(work_study))
+        
+        # Show message if no workers are available
+        if not available_workers:
+            QMessageBox.warning(self, "No Available Workers", 
+                               f"No workers are available on {day} from {format_time_ampm(start_time)} to {format_time_ampm(end_time)}.")
+
 class WorkplaceTab(QWidget):
     """Tab for managing a specific workplace"""
     
@@ -1069,10 +1282,15 @@ class WorkplaceTab(QWidget):
         view_btn = StyleHelper.create_button("View Current Schedule", primary=False)
         view_btn.clicked.connect(self.view_current_schedule)
         
+        last_minute_btn = StyleHelper.create_button("Last Minute", primary=False)
+        last_minute_btn.setStyleSheet("background-color: #fd7e14; color: white;")
+        last_minute_btn.clicked.connect(self.show_last_minute_dialog)
+        
         actions_layout.addWidget(upload_btn)
         actions_layout.addWidget(hours_btn)
         actions_layout.addWidget(generate_btn)
         actions_layout.addWidget(view_btn)
+        actions_layout.addWidget(last_minute_btn)
         
         layout.addLayout(actions_layout)
         
@@ -1124,9 +1342,64 @@ class WorkplaceTab(QWidget):
         
         hours_tab.setLayout(hours_layout)
         
+        # last minute tab
+        last_minute_tab = QWidget()
+        last_minute_layout = QVBoxLayout()
+        
+        last_minute_title = QLabel("Last Minute Availability")
+        last_minute_title.setStyleSheet("font-size: 14px; font-weight: bold;")
+        last_minute_layout.addWidget(last_minute_title)
+        
+        last_minute_desc = QLabel("Check which workers are available for a specific time slot.")
+        last_minute_desc.setWordWrap(True)
+        last_minute_layout.addWidget(last_minute_desc)
+        
+        # Form for selecting day and time
+        form_layout = QFormLayout()
+        
+        # Day selection
+        self.lm_day_combo = QComboBox()
+        self.lm_day_combo.addItems(DAYS)
+        form_layout.addRow("Day:", self.lm_day_combo)
+        
+        # Time selection
+        time_layout = QHBoxLayout()
+        
+        self.lm_start_time = QTimeEdit()
+        self.lm_start_time.setDisplayFormat("HH:mm")
+        self.lm_start_time.setTime(QTime(9, 0))
+        
+        self.lm_end_time = QTimeEdit()
+        self.lm_end_time.setDisplayFormat("HH:mm")
+        self.lm_end_time.setTime(QTime(17, 0))
+        
+        time_layout.addWidget(QLabel("Start:"))
+        time_layout.addWidget(self.lm_start_time)
+        time_layout.addWidget(QLabel("End:"))
+        time_layout.addWidget(self.lm_end_time)
+        
+        form_layout.addRow("Time:", time_layout)
+        
+        last_minute_layout.addLayout(form_layout)
+        
+        # Check button
+        check_btn = StyleHelper.create_action_button("Check Availability")
+        check_btn.clicked.connect(self.check_last_minute_availability)
+        last_minute_layout.addWidget(check_btn)
+        
+        # Results table
+        self.lm_results_table = QTableWidget()
+        self.lm_results_table.setColumnCount(3)
+        self.lm_results_table.setHorizontalHeaderLabels(["Name", "Email", "Work Study"])
+        self.lm_results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        last_minute_layout.addWidget(self.lm_results_table)
+        
+        last_minute_tab.setLayout(last_minute_layout)
+        
         # add tabs
         self.tabs.addTab(workers_tab, "Workers")
         self.tabs.addTab(hours_tab, "Hours of Operation")
+        self.tabs.addTab(last_minute_tab, "Last Minute")
         
         layout.addWidget(self.tabs)
         
@@ -1820,7 +2093,7 @@ class WorkplaceTab(QWidget):
                 edit_btn.setMinimumWidth(80)  # Make button wider
                 edit_btn.setStyleSheet("background-color: #ffc107; color: black; font-size: 12px; padding: 6px 12px;")
                 edit_btn.clicked.connect(lambda _, d=day, s=shift, r=row_index, t=all_shifts_table: 
-                                        self.edit_shift_assignment(d, s, r, t, all_workers))
+                                        self.edit_shift_assignment(d, s, r, t, all_workers, dialog))
                 
                 edit_layout.addWidget(edit_btn)
                 edit_layout.addStretch()
@@ -1911,6 +2184,9 @@ class WorkplaceTab(QWidget):
         tabs.addTab(schedule_tab, "Schedule")
         tabs.addTab(hours_tab, "Worker Hours")
         
+        # Connect tab change signal to update worker hours
+        tabs.currentChanged.connect(lambda: self.update_worker_hours_tab(dialog, hours_table))
+        
         layout.addWidget(tabs)
         
         # Buttons
@@ -1918,10 +2194,12 @@ class WorkplaceTab(QWidget):
         
         save_btn = StyleHelper.create_button("Save Schedule")
         email_btn = StyleHelper.create_button("Email Schedule")
+        print_btn = StyleHelper.create_button("Print Schedule")
         close_btn = StyleHelper.create_button("Close", primary=False)
         
         buttons_layout.addWidget(save_btn)
         buttons_layout.addWidget(email_btn)
+        buttons_layout.addWidget(print_btn)
         buttons_layout.addWidget(close_btn)
         
         layout.addLayout(buttons_layout)
@@ -1932,15 +2210,75 @@ class WorkplaceTab(QWidget):
         dialog.schedule = schedule
         dialog.all_workers = all_workers
         dialog.assigned_hours = assigned_hours
+        dialog.hours_table = hours_table
         
         # Connect buttons
         save_btn.clicked.connect(lambda: self.save_schedule(dialog, dialog.schedule))
         email_btn.clicked.connect(lambda: self.email_schedule_dialog(dialog.schedule))
+        print_btn.clicked.connect(lambda: self.print_schedule(dialog.schedule))
         close_btn.clicked.connect(dialog.reject)
         
         dialog.exec_()
     
-    def edit_shift_assignment(self, day, shift, row, table, all_workers):
+    def update_worker_hours_tab(self, dialog, hours_table):
+        """Update the worker hours tab with current data"""
+        if not hasattr(dialog, 'assigned_hours') or not hasattr(dialog, 'all_workers'):
+            return
+        
+        # Recalculate assigned hours
+        assigned_hours = {w['email']: 0 for w in dialog.all_workers}
+        
+        for day, shifts in dialog.schedule.items():
+            for shift in shifts:
+                shift_start = time_to_hour(shift['start'])
+                shift_end = time_to_hour(shift['end'])
+                shift_hours = shift_end - shift_start
+                
+                for email in shift.get('raw_assigned', []):
+                    assigned_hours[email] = assigned_hours.get(email, 0) + shift_hours
+        
+        # Update the hours table
+        sorted_workers = sorted(assigned_hours.items(), key=lambda x: x[1], reverse=True)
+        
+        for i, (email, hours) in enumerate(sorted_workers):
+            if i < hours_table.rowCount():
+                # Find worker name
+                worker_name = email
+                for worker in self.get_workers():
+                    if worker['email'] == email:
+                        worker_name = f"{worker['first_name']} {worker['last_name']}"
+                        break
+                
+                # Update worker name
+                hours_table.item(i, 0).setText(worker_name)
+                
+                # Update hours
+                hours_table.item(i, 1).setText(f"{hours:.1f}")
+                if hours == 0:
+                    hours_table.item(i, 1).setBackground(QColor(255, 200, 200))
+                elif hours < 4:
+                    hours_table.item(i, 1).setBackground(QColor(255, 255, 200))
+                else:
+                    hours_table.item(i, 1).setBackground(QColor(255, 255, 255))
+                
+                # Update status
+                if hours == 0:
+                    status = "Unassigned"
+                    hours_table.item(i, 2).setText(status)
+                    hours_table.item(i, 2).setBackground(QColor(255, 200, 200))
+                elif hours < 4:
+                    status = "Low Hours"
+                    hours_table.item(i, 2).setText(status)
+                    hours_table.item(i, 2).setBackground(QColor(255, 255, 200))
+                else:
+                    status = "OK"
+                    hours_table.item(i, 2).setText(status)
+                    hours_table.item(i, 2).setBackground(QColor(255, 255, 255))
+        
+        # Update dialog's assigned hours
+        dialog.assigned_hours = assigned_hours
+    
+    def edit_shift_assignment(self, day, shift, row, table, all_workers, parent_dialog):
         """Edit worker assignment for a shift"""
         if not all_workers:
             QMessageBox.warning(self, "Warning", "No workers available to edit this shift.")
@@ -2013,12 +2351,12 @@ class WorkplaceTab(QWidget):
         dialog.setLayout(layout)
         
         # Connect buttons
-        save_btn.clicked.connect(lambda: self.update_shift_assignment(dialog, day, shift, row, table, worker_list))
+        save_btn.clicked.connect(lambda: self.update_shift_assignment(dialog, day, shift, row, table, worker_list, parent_dialog))
         cancel_btn.clicked.connect(dialog.reject)
         
         dialog.exec_()
     
-    def update_shift_assignment(self, dialog, day, shift, row, table, worker_list):
+    def update_shift_assignment(self, dialog, day, shift, row, table, worker_list, parent_dialog):
         """Update the worker assignment for a shift"""
         # Get selected workers
         selected_workers = []
@@ -2039,24 +2377,12 @@ class WorkplaceTab(QWidget):
         table.setItem(row, 3, assigned_item)  # Update column 3 (Assigned) in the consolidated table
         
         # Update parent dialog's schedule
-        parent_dialog = dialog.parent()
         if hasattr(parent_dialog, 'schedule'):
             parent_dialog.schedule[day] = [s if s != shift else shift for s in parent_dialog.schedule[day]]
             
-            # Recalculate assigned hours
-            if hasattr(parent_dialog, 'all_workers') and parent_dialog.all_workers:
-                assigned_hours = {w['email']: 0 for w in parent_dialog.all_workers}
-                
-                for day, shifts in parent_dialog.schedule.items():
-                    for s in shifts:
-                        shift_start = time_to_hour(s['start'])
-                        shift_end = time_to_hour(s['end'])
-                        shift_hours = shift_end - shift_start
-                        
-                        for email in s['raw_assigned']:
-                            assigned_hours[email] = assigned_hours.get(email, 0) + shift_hours
-                
-                parent_dialog.assigned_hours = assigned_hours
+            # Update worker hours tab if it's visible
+            if hasattr(parent_dialog, 'hours_table'):
+                self.update_worker_hours_tab(parent_dialog, parent_dialog.hours_table)
         
         dialog.accept()
     
@@ -2103,14 +2429,48 @@ class WorkplaceTab(QWidget):
     def save_schedule(self, dialog, schedule):
         """Save schedule to file"""
         try:
-            # create save path
-            save_path = os.path.join(DIRS['saved_schedules'], f"{self.workplace}_current.json")
+            # create save path for JSON
+            json_path = os.path.join(DIRS['saved_schedules'], f"{self.workplace}_current.json")
             
-            # save schedule
-            with open(save_path, "w") as f:
+            # save schedule as JSON
+            with open(json_path, "w") as f:
                 json.dump(schedule, f, indent=4)
             
-            QMessageBox.information(dialog, "Success", "Schedule saved successfully.")
+            # Also save as Excel for easier reading
+            excel_path = os.path.join(DIRS['saved_schedules'], f"{self.workplace}_current.xlsx")
+            
+            # Create Excel file
+            with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+                # Create a sheet for each day
+                for day in DAYS:
+                    if day in schedule and schedule[day]:
+                        shifts = schedule[day]
+                        data = []
+                        for shift in shifts:
+                            data.append({
+                                "Start": format_time_ampm(shift['start']),
+                                "End": format_time_ampm(shift['end']),
+                                "Assigned": ", ".join(shift['assigned'])
+                            })
+                        df = pd.DataFrame(data)
+                        df.to_excel(writer, sheet_name=day, index=False)
+                
+                # Create a summary sheet
+                all_shifts = []
+                for day, shifts in schedule.items():
+                    for shift in shifts:
+                        all_shifts.append({
+                            "Day": day,
+                            "Start": format_time_ampm(shift['start']),
+                            "End": format_time_ampm(shift['end']),
+                            "Assigned": ", ".join(shift['assigned'])
+                        })
+                
+                if all_shifts:
+                    summary_df = pd.DataFrame(all_shifts)
+                    summary_df.to_excel(writer, sheet_name="Full Schedule", index=False)
+            
+            QMessageBox.information(dialog, "Success", f"Schedule saved successfully to:\n{excel_path}")
             
         except Exception as e:
             logging.error(f"Error saving schedule: {str(e)}")
@@ -2201,6 +2561,82 @@ class WorkplaceTab(QWidget):
             logging.error(f"Error sending email: {str(e)}")
             QMessageBox.critical(dialog, "Error", f"Error sending email: {str(e)}")
     
+    def print_schedule(self, schedule):
+        """Print the schedule"""
+        try:
+            # Create a temporary HTML file for printing
+            html_content = """
+            <html>
+            <head>
+                <style>
+                    body { font-family: Arial, sans-serif; }
+                    h1 { text-align: center; }
+                    h2 { margin-top: 20px; }
+                    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+                    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                    th { background-color: #f2f2f2; }
+                    .unfilled { color: red; }
+                </style>
+            </head>
+            <body>
+                <h1>""" + self.workplace.replace('_', ' ').title() + """ Schedule</h1>
+            """
+            
+            # Add each day's schedule
+            for day in DAYS:
+                if day in schedule and schedule[day]:
+                    html_content += f"<h2>{day}</h2>"
+                    html_content += "<table>"
+                    html_content += "<tr><th>Start</th><th>End</th><th>Assigned</th></tr>"
+                    
+                    for shift in schedule[day]:
+                        assigned = ", ".join(shift['assigned'])
+                        unfilled_class = ' class="unfilled"' if "Unfilled" in assigned else ""
+                        
+                        html_content += "<tr>"
+                        html_content += f"<td>{format_time_ampm(shift['start'])}</td>"
+                        html_content += f"<td>{format_time_ampm(shift['end'])}</td>"
+                        html_content += f"<td{unfilled_class}>{assigned}</td>"
+                        html_content += "</tr>"
+                    
+                    html_content += "</table>"
+            
+            html_content += """
+            </body>
+            </html>
+            """
+            
+            # Create print dialog
+            printer = QPrinter()
+            preview = QPrintPreviewDialog(printer)
+            preview.paintRequested.connect(lambda p: self.print_html(p, html_content))
+            preview.exec_()
+            
+        except Exception as e:
+            logging.error(f"Error printing schedule: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error printing schedule: {str(e)}")
+    
+    def print_html(self, printer, html_content):
+        """Print HTML content"""
+        from PyQt5.QtWebEngineWidgets import QWebEngineView
+        from PyQt5.QtCore import QUrl
+        
+        # Create a temporary file
+        import tempfile
+        temp_file = tempfile.NamedTemporaryFile(suffix='.html', delete=False)
+        temp_file.write(html_content.encode('utf-8'))
+        temp_file.close()
+        
+        # Create web view and load the HTML
+        web = QWebEngineView()
+        web.load(QUrl.fromLocalFile(temp_file.name))
+        
+        # Wait for the page to load
+        def print_page():
+            web.page().print(printer, lambda _: None)
+        
+        web.loadFinished.connect(print_page)
+    
     def view_current_schedule(self):
         """View current saved schedule"""
         # check if schedule exists
@@ -2247,6 +2683,71 @@ class WorkplaceTab(QWidget):
         except Exception as e:
             logging.error(f"Error viewing schedule: {str(e)}")
             QMessageBox.critical(self, "Error", f"Error viewing schedule: {str(e)}")
+    
+    def show_last_minute_dialog(self):
+        """Show dialog for last minute availability"""
+        dialog = LastMinuteAvailabilityDialog(self.workplace, self)
+        dialog.exec_()
+    
+    def check_last_minute_availability(self):
+        """Check last minute availability from the tab"""
+        day = self.lm_day_combo.currentText()
+        start_time = self.lm_start_time.time().toString("HH:mm")
+        end_time = self.lm_end_time.time().toString("HH:mm")
+        
+        # Get workers
+        workers = self.get_workers()
+        
+        # Find available workers
+        available_workers = []
+        for worker in workers:
+            # Get availability
+            avail_column = None
+            file_path = os.path.join(DIRS['workplaces'], f"{self.workplace}.xlsx")
+            if os.path.exists(file_path):
+                df = pd.read_excel(file_path)
+                df.columns = df.columns.str.strip()
+                avail_column = next((col for col in df.columns if 'available' in col.lower()), None)
+                
+                if avail_column:
+                    worker_row = df[df['Email'] == worker['email']]
+                    if not worker_row.empty:
+                        availability_text = str(worker_row.iloc[0].get(avail_column, ""))
+                        if not pd.isna(availability_text) and availability_text != "nan":
+                            availability = parse_availability(availability_text)
+                            
+                            # Check if worker is available
+                            start_hour = time_to_hour(start_time)
+                            end_hour = time_to_hour(end_time)
+                            
+                            day_availability = availability.get(day, [])
+                            for avail in day_availability:
+                                avail_start = avail['start_hour']
+                                avail_end = avail['end_hour']
+                                
+                                if avail_start <= start_hour and end_hour <= avail_end:
+                                    available_workers.append(worker)
+                                    break
+        
+        # Display results
+        self.lm_results_table.setRowCount(len(available_workers))
+        
+        for i, worker in enumerate(available_workers):
+            # Name
+            name = f"{worker['first_name']} {worker['last_name']}"
+            self.lm_results_table.setItem(i, 0, QTableWidgetItem(name))
+            
+            # Email
+            self.lm_results_table.setItem(i, 1, QTableWidgetItem(worker['email']))
+            
+            # Work Study
+            work_study = "Yes" if worker['work_study'] else "No"
+            self.lm_results_table.setItem(i, 2, QTableWidgetItem(work_study))
+        
+        # Show message if no workers are available
+        if not available_workers:
+            QMessageBox.warning(self, "No Available Workers", 
+                               f"No workers are available on {day} from {format_time_ampm(start_time)} to {format_time_ampm(end_time)}.")
 
 class MainWindow(QMainWindow):
     """Main application window"""
