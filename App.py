@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QFileDialog, QMessageBox, QTabWidget, QLineEdit, QCheckBox,
                             QTimeEdit, QSpinBox, QFormLayout, QGroupBox, QTextEdit, QDialog,
                             QScrollArea, QFrame, QSplitter, QStackedWidget, QListWidget,
-                            QGridLayout, QTimeEdit, QHeaderView, QListWidgetItem)
+                            QGridLayout, QHeaderView, QListWidgetItem)
 from PyQt5.QtCore import Qt, QTime, QSize, QSettings, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QColor, QPalette
 
@@ -553,6 +553,196 @@ class StyleHelper:
         """)
         return btn
 
+class DayTimeBlockWidget(QWidget):
+    """Widget for managing a single day's time blocks"""
+    
+    def __init__(self, day, parent=None):
+        super().__init__(parent)
+        self.day = day
+        self.time_blocks = []
+        self.initUI()
+    
+    def initUI(self):
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Day label
+        day_label = QLabel(self.day)
+        day_label.setStyleSheet("font-weight: bold;")
+        self.layout.addWidget(day_label)
+        
+        # Container for time blocks
+        self.blocks_container = QWidget()
+        self.blocks_layout = QVBoxLayout(self.blocks_container)
+        self.blocks_layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.addWidget(self.blocks_container)
+        
+        # Add button
+        add_btn = QPushButton("Add Time Block")
+        add_btn.clicked.connect(self.add_time_block)
+        self.layout.addWidget(add_btn)
+    
+    def add_time_block(self):
+        """Add a new time block"""
+        block_widget = QWidget()
+        block_layout = QHBoxLayout(block_widget)
+        block_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Start time
+        start_time = QTimeEdit()
+        start_time.setDisplayFormat("HH:mm")
+        start_time.setTime(QTime(9, 0))
+        
+        # End time
+        end_time = QTimeEdit()
+        end_time.setDisplayFormat("HH:mm")
+        end_time.setTime(QTime(17, 0))
+        
+        # Remove button
+        remove_btn = QPushButton("Remove")
+        remove_btn.setStyleSheet("background-color: #dc3545;")
+        remove_btn.clicked.connect(lambda: self.remove_time_block(block_widget))
+        
+        block_layout.addWidget(QLabel("Start:"))
+        block_layout.addWidget(start_time)
+        block_layout.addWidget(QLabel("End:"))
+        block_layout.addWidget(end_time)
+        block_layout.addWidget(remove_btn)
+        
+        self.blocks_layout.addWidget(block_widget)
+        self.time_blocks.append((start_time, end_time))
+    
+    def remove_time_block(self, block_widget):
+        """Remove a time block"""
+        index = -1
+        for i in range(self.blocks_layout.count()):
+            if self.blocks_layout.itemAt(i).widget() == block_widget:
+                index = i
+                break
+        
+        if index >= 0:
+            self.blocks_layout.itemAt(index).widget().deleteLater()
+            self.time_blocks.pop(index)
+    
+    def set_blocks(self, blocks):
+        """Set time blocks from data"""
+        # Clear existing blocks
+        while self.blocks_layout.count():
+            widget = self.blocks_layout.itemAt(0).widget()
+            if widget:
+                widget.deleteLater()
+        self.time_blocks = []
+        
+        # Add blocks from data
+        for block in blocks:
+            self.add_time_block_with_data(block)
+    
+    def add_time_block_with_data(self, block):
+        """Add a time block with specific data"""
+        block_widget = QWidget()
+        block_layout = QHBoxLayout(block_widget)
+        block_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Start time
+        start_time = QTimeEdit()
+        start_time.setDisplayFormat("HH:mm")
+        if 'start' in block:
+            start_time.setTime(QTime.fromString(block['start'], "HH:mm"))
+        
+        # End time
+        end_time = QTimeEdit()
+        end_time.setDisplayFormat("HH:mm")
+        if 'end' in block:
+            end_time.setTime(QTime.fromString(block['end'], "HH:mm"))
+        
+        # Remove button
+        remove_btn = QPushButton("Remove")
+        remove_btn.setStyleSheet("background-color: #dc3545;")
+        remove_btn.clicked.connect(lambda: self.remove_time_block(block_widget))
+        
+        block_layout.addWidget(QLabel("Start:"))
+        block_layout.addWidget(start_time)
+        block_layout.addWidget(QLabel("End:"))
+        block_layout.addWidget(end_time)
+        block_layout.addWidget(remove_btn)
+        
+        self.blocks_layout.addWidget(block_widget)
+        self.time_blocks.append((start_time, end_time))
+    
+    def get_blocks(self):
+        """Get time blocks as data"""
+        blocks = []
+        for start_time, end_time in self.time_blocks:
+            blocks.append({
+                "start": start_time.time().toString("HH:mm"),
+                "end": end_time.time().toString("HH:mm")
+            })
+        return blocks
+
+class HoursOfOperationDialog(QDialog):
+    """Dialog for managing hours of operation"""
+    
+    def __init__(self, workplace, hours_data, parent=None):
+        super().__init__(parent)
+        self.workplace = workplace
+        self.hours_data = hours_data
+        self.day_widgets = {}
+        self.initUI()
+    
+    def initUI(self):
+        self.setWindowTitle(f"Hours of Operation - {self.workplace.replace('_', ' ').title()}")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(600)
+        
+        layout = QVBoxLayout()
+        
+        # Scroll area for days
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        
+        # Create widgets for each day
+        for day in DAYS:
+            day_widget = DayTimeBlockWidget(day)
+            blocks = self.hours_data.get(day, [])
+            day_widget.set_blocks(blocks)
+            
+            scroll_layout.addWidget(day_widget)
+            self.day_widgets[day] = day_widget
+        
+        scroll_content.setLayout(scroll_layout)
+        scroll_area.setWidget(scroll_content)
+        
+        layout.addWidget(scroll_area)
+        
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        
+        save_btn = StyleHelper.create_button("Save")
+        save_btn.clicked.connect(self.save_hours)
+        
+        cancel_btn = StyleHelper.create_button("Cancel", primary=False)
+        cancel_btn.clicked.connect(self.reject)
+        
+        buttons_layout.addWidget(save_btn)
+        buttons_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(buttons_layout)
+        
+        self.setLayout(layout)
+    
+    def save_hours(self):
+        """Save hours of operation"""
+        hours_data = {}
+        
+        for day, widget in self.day_widgets.items():
+            hours_data[day] = widget.get_blocks()
+        
+        self.hours_data = hours_data
+        self.accept()
+
 class WorkplaceTab(QWidget):
     """Tab for managing a specific workplace"""
     
@@ -1075,177 +1265,36 @@ class WorkplaceTab(QWidget):
     
     def manage_hours(self):
         """Show dialog to manage hours of operation"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Hours of Operation")
-        dialog.setMinimumWidth(500)
-        
-        layout = QVBoxLayout()
-        
-        # get current hours of operation
+        # Get current hours of operation
         hours = {}
         if self.workplace in self.app_data and 'hours_of_operation' in self.app_data[self.workplace]:
             hours = self.app_data[self.workplace]['hours_of_operation']
         
-        # create form
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
+        # Show dialog
+        dialog = HoursOfOperationDialog(self.workplace, hours, self)
         
-        scroll_content = QWidget()
-        scroll_layout = QVBoxLayout()
-        
-        day_widgets = {}
-        
-        for day in DAYS:
-            day_group = QGroupBox(day)
-            day_layout = QVBoxLayout()
-            
-            # get blocks for this day
-            blocks = hours.get(day, [])
-            
-            # create widgets for blocks
-            block_widgets = []
-            
-            if blocks:
-                for block in blocks:
-                    block_layout = QHBoxLayout()
-                    
-                    start_time = QTimeEdit()
-                    start_time.setDisplayFormat("HH:mm")
-                    if 'start' in block:
-                        start_time.setTime(QTime.fromString(block['start'], "HH:mm"))
-                    
-                    end_time = QTimeEdit()
-                    end_time.setDisplayFormat("HH:mm")
-                    if 'end' in block:
-                        end_time.setTime(QTime.fromString(block['end'], "HH:mm"))
-                    
-                    block_layout.addWidget(QLabel("Start:"))
-                    block_layout.addWidget(start_time)
-                    block_layout.addWidget(QLabel("End:"))
-                    block_layout.addWidget(end_time)
-                    
-                    remove_btn = QPushButton("Remove")
-                    remove_btn.setStyleSheet("background-color: #dc3545;")
-                    remove_btn.clicked.connect(lambda _, layout=block_layout: layout.parentWidget().deleteLater())
-                    
-                    block_layout.addWidget(remove_btn)
-                    
-                    block_widget = QWidget()
-                    block_widget.setLayout(block_layout)
-                    day_layout.addWidget(block_widget)
-                    
-                    block_widgets.append((start_time, end_time))
-            
-            # add button
-            add_btn = QPushButton("Add Time Block")
-            add_btn.clicked.connect(lambda _, d=day, l=day_layout, w=block_widgets: self.add_time_block(d, l, w))
-            
-            day_layout.addWidget(add_btn)
-            day_group.setLayout(day_layout)
-            
-            scroll_layout.addWidget(day_group)
-            
-            day_widgets[day] = block_widgets
-        
-        scroll_content.setLayout(scroll_layout)
-        scroll_area.setWidget(scroll_content)
-        
-        layout.addWidget(scroll_area)
-        
-        # buttons
-        buttons_layout = QHBoxLayout()
-        
-        save_btn = StyleHelper.create_button("Save")
-        cancel_btn = StyleHelper.create_button("Cancel", primary=False)
-        
-        buttons_layout.addWidget(save_btn)
-        buttons_layout.addWidget(cancel_btn)
-        
-        layout.addLayout(buttons_layout)
-        
-        dialog.setLayout(layout)
-        
-        # connect buttons
-        save_btn.clicked.connect(lambda: self.save_hours(dialog, day_widgets))
-        cancel_btn.clicked.connect(dialog.reject)
-        
-        dialog.exec_()
-    
-    def add_time_block(self, day, layout, block_widgets):
-        """Add a time block to a day"""
-        block_layout = QHBoxLayout()
-        
-        start_time = QTimeEdit()
-        start_time.setDisplayFormat("HH:mm")
-        
-        end_time = QTimeEdit()
-        end_time.setDisplayFormat("HH:mm")
-        
-        block_layout.addWidget(QLabel("Start:"))
-        block_layout.addWidget(start_time)
-        block_layout.addWidget(QLabel("End:"))
-        block_layout.addWidget(end_time)
-        
-        remove_btn = QPushButton("Remove")
-        remove_btn.setStyleSheet("background-color: #dc3545;")
-        remove_btn.clicked.connect(lambda _, layout=block_layout: layout.parentWidget().deleteLater())
-        
-        block_layout.addWidget(remove_btn)
-        
-        block_widget = QWidget()
-        block_widget.setLayout(block_layout)
-        
-        # insert before the Add button
-        layout.insertWidget(layout.count() - 1, block_widget)
-        
-        block_widgets.append((start_time, end_time))
-    
-    def save_hours(self, dialog, day_widgets):
-        """Save hours of operation"""
-        try:
-            # load app data
+        if dialog.exec_() == QDialog.Accepted:
+            # Save updated hours
             app_data = load_data()
             
-            # initialize workplace data if not exists
+            # Initialize workplace data if not exists
             if self.workplace not in app_data:
                 app_data[self.workplace] = {}
             
-            # initialize hours of operation if not exists
-            if 'hours_of_operation' not in app_data[self.workplace]:
-                app_data[self.workplace]['hours_of_operation'] = {}
+            # Update hours of operation
+            app_data[self.workplace]['hours_of_operation'] = dialog.hours_data
             
-            # update hours of operation
-            for day, block_widgets in day_widgets.items():
-                blocks = []
-                
-                for start_time, end_time in block_widgets:
-                    start = start_time.time().toString("HH:mm")
-                    end = end_time.time().toString("HH:mm")
-                    
-                    blocks.append({
-                        "start": start,
-                        "end": end
-                    })
-                
-                app_data[self.workplace]['hours_of_operation'][day] = blocks
-            
-            # save app data
+            # Save app data
             if save_data(app_data):
-                # update instance data
+                # Update instance data
                 self.app_data = app_data
                 
-                # reload hours table
+                # Reload hours table
                 self.load_hours_table(self.hours_table)
-                
-                dialog.accept()
                 
                 QMessageBox.information(self, "Success", "Hours of operation saved successfully.")
             else:
-                QMessageBox.critical(dialog, "Error", "Error saving hours of operation.")
-            
-        except Exception as e:
-            logging.error(f"Error saving hours of operation: {str(e)}")
-            QMessageBox.critical(dialog, "Error", f"Error saving hours of operation: {str(e)}")
+                QMessageBox.critical(self, "Error", "Error saving hours of operation.")
     
     def generate_schedule(self):
         """Generate schedule for workplace"""
